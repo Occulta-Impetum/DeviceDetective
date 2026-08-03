@@ -78,7 +78,9 @@ function Write-DeviceDetectiveLog {
     $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $LogEntry = "[$Timestamp] [$Level] $Message"
 
-    Write-Output $LogEntry
+    # Display in the NinjaOne activity output without adding data
+    # to the PowerShell success pipeline.
+    Write-Host $LogEntry
 
     try {
         Add-Content -Path $LogPath -Value $LogEntry -Encoding UTF8
