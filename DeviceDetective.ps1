@@ -8,10 +8,11 @@
       - Creates the local Device Detective working directory
       - Downloads, validates, caches, and hash-checks device-database.csv
       - Enumerates currently present Mouse, Keyboard, and HIDClass devices
-      - Extracts and normalizes VID/PID values when available
-      - Consolidates duplicate interfaces representing the same device model
+      - Extracts and normalizes USB and Bluetooth VID/PID values when available
+      - Consolidates duplicate interfaces representing the same physical device model
+      - Excludes generic Bluetooth HID child interfaces that cannot identify a model
       - Resolves friendly names and classifications from the local database
-      - Refreshes the database once when an unresolved device is detected
+      - Refreshes the database only for valid VID/PID models missing from the cache
       - Writes the current inventory and summary to NinjaOne custom fields
 
     Baseline comparison and alert-state persistence are not enabled yet.
@@ -34,10 +35,10 @@ $ErrorActionPreference = "Stop"
 
 $DatabaseUrl = $env:githubUrl
 
-$RootPath        = Join-Path $env:ProgramData "SysAdminBot\DeviceDetective"
-$DatabasePath    = Join-Path $RootPath "device-database.csv"
-$TemporaryPath   = Join-Path $RootPath "device-database.download"
-$LogPath         = Join-Path $RootPath "DeviceDetective.log"
+$RootPath      = Join-Path $env:ProgramData "SysAdminBot\DeviceDetective"
+$DatabasePath  = Join-Path $RootPath "device-database.csv"
+$TemporaryPath = Join-Path $RootPath "device-database.download"
+$LogPath       = Join-Path $RootPath "DeviceDetective.log"
 
 $RequiredColumns = @(
     "VendorID"
@@ -68,6 +69,9 @@ $CustomFields = @{
 # Prevent excessively large values from being written to multiline fields.
 $MaximumMultiLineLength = 9000
 
+# Prevent repeated GitHub downloads when a valid but unknown model remains connected.
+$MinimumMissingModelRefreshAgeHours = 24
+
 # ---------------------------------------------------------------------------
 # Functions
 # ---------------------------------------------------------------------------
@@ -85,8 +89,6 @@ function Write-DeviceDetectiveLog {
     $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $LogEntry = "[$Timestamp] [$Level] $Message"
 
-    # Display in the NinjaOne activity output without adding data
-    # to the PowerShell success pipeline.
     Write-Host $LogEntry
 
     try {
@@ -182,12 +184,7 @@ function Test-DeviceDatabase {
     }
 
     $ActualColumns = @($Database[0].PSObject.Properties.Name)
-
-    $MissingColumns = @(
-        $RequiredColumns | Where-Object {
-            $_ -notin $ActualColumns
-        }
-    )
+    $MissingColumns = @($RequiredColumns | Where-Object { $_ -notin $ActualColumns })
 
     if ($MissingColumns.Count -gt 0) {
         throw "Database is missing required columns: $($MissingColumns -join ', ')"
@@ -246,7 +243,6 @@ function Install-DeviceDatabase {
     }
 
     Write-DeviceDetectiveLog "Downloading the device database."
-
     Remove-Item -LiteralPath $TemporaryPath -Force -ErrorAction SilentlyContinue
 
     try {
@@ -319,6 +315,7 @@ function Get-CurrentDeviceModels {
     }
 
     $UniqueDevices = @{}
+    $IgnoredGenericBluetoothInterfaces = 0
 
     foreach ($Device in $AllDevices) {
         $InstanceID = [string]$Device.InstanceId
@@ -337,16 +334,23 @@ function Get-CurrentDeviceModels {
 
         $VendorID = $null
         $ProductID = $null
-        $IsStandardVidPid = $false
+        $IdentifierType = "Nonstandard"
 
+        # Standard USB/HID format, for example VID_03F0&PID_584A.
         if ($InstanceID -match '(?i)VID_([0-9A-F]{4})&PID_([0-9A-F]{4})') {
             $VendorID = $Matches[1].ToUpperInvariant()
             $ProductID = $Matches[2].ToUpperInvariant()
-            $IsStandardVidPid = $true
+            $IdentifierType = "Standard VID/PID"
+        }
+        # Bluetooth Classic HID can encode the vendor source plus the actual
+        # four-character vendor ID, for example:
+        # {GUID}_VID&00023434_PID&02A0 -> VID 3434 / PID 02A0.
+        elseif ($DeviceInformation -match '(?i)_VID&[0-9A-F]{4}([0-9A-F]{4})_PID&([0-9A-F]{4})') {
+            $VendorID = $Matches[1].ToUpperInvariant()
+            $ProductID = $Matches[2].ToUpperInvariant()
+            $IdentifierType = "Bluetooth VID/PID"
         }
         else {
-            # Preserve the behavior of the original script for devices that do
-            # not expose normal USB VID/PID values, including some Bluetooth HID devices.
             $CandidateVendor = (($DeviceInformation -split '&')[0] -replace '(?i)^VID_', '').Trim()
 
             if (-not [string]::IsNullOrWhiteSpace($CandidateVendor)) {
@@ -359,7 +363,30 @@ function Get-CurrentDeviceModels {
             continue
         }
 
-        $UniqueKey = if ($IsStandardVidPid) {
+        $HasValidVidPid = (
+            $VendorID -match '^[0-9A-F]{4}$' -and
+            $ProductID -match '^[0-9A-F]{4}$'
+        )
+
+        # Windows exposes generic BLE GATT child interfaces in addition to the
+        # actual keyboard or mouse model. These records do not safely identify
+        # a model and should not create a duplicate Unknown device.
+        $IsGenericBluetoothChild = (
+            -not $HasValidVidPid -and
+            (
+                [string]$Device.FriendlyName -match '(?i)^Bluetooth Low Energy GATT compliant HID device$' -or
+                [string]$Device.FriendlyName -match '(?i)^Bluetooth HID Device$'
+            )
+        )
+
+        if ($IsGenericBluetoothChild) {
+            $IgnoredGenericBluetoothInterfaces++
+            continue
+        }
+
+        # Normalized VID/PID is the model identity. USB and Bluetooth interfaces
+        # for the same model therefore collapse into one inventory entry.
+        $UniqueKey = if ($HasValidVidPid) {
             "$VendorID|$ProductID"
         }
         else {
@@ -381,12 +408,19 @@ function Get-CurrentDeviceModels {
             FriendlyName    = [string]$Device.FriendlyName
             PnpClass        = [string]$Device.Class
             InstanceID      = $InstanceID
+            IdentifierType  = $IdentifierType
+            HasValidVidPid  = $HasValidVidPid
             LookupMatched   = $false
         }
     }
 
     $Results = @($UniqueDevices.Values | Sort-Object VendorID, ProductID, FullDeviceData)
     Write-DeviceDetectiveLog "Collected $($Results.Count) unique monitored device models."
+
+    if ($IgnoredGenericBluetoothInterfaces -gt 0) {
+        Write-DeviceDetectiveLog "Ignored $IgnoredGenericBluetoothInterfaces generic Bluetooth HID child interface(s)."
+    }
+
     return $Results
 }
 
@@ -489,6 +523,7 @@ function Format-CurrentDevices {
             "VendorName: $VendorName"
             "ProductID: $ProductID"
             "ProductName: $ProductName"
+            "Identifier type: $($Device.IdentifierType)"
             "Device data: $($Device.FullDeviceData)"
         ) -join [Environment]::NewLine
     }
@@ -521,7 +556,6 @@ function Get-InventoryStatus {
 $RunTime = Get-Date
 
 try {
-    # Ensure modern HTTPS support under Windows PowerShell 5.1.
     [Net.ServicePointManager]::SecurityProtocol = `
         [Net.ServicePointManager]::SecurityProtocol -bor `
         [Net.SecurityProtocolType]::Tls12
@@ -630,18 +664,29 @@ try {
     $CurrentDevices = @(Get-CurrentDeviceModels)
     $CurrentDevices = @(Resolve-DeviceModels -Devices $CurrentDevices -Database $Database)
 
-    $DatabaseRefreshedForUnknown = $false
-    $UnresolvedBeforeRefresh = @($CurrentDevices | Where-Object { -not $_.LookupMatched })
+    $DatabaseRefreshedForMissingModel = $false
+    $MissingValidModelsBeforeRefresh = @(
+        $CurrentDevices | Where-Object {
+            $_.HasValidVidPid -and -not $_.LookupMatched
+        }
+    )
 
-    if ($UnresolvedBeforeRefresh.Count -gt 0 -and -not $DatabaseNeedsDownload) {
+    $DatabaseAgeHours = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $DatabasePath).LastWriteTimeUtc).TotalHours
+    $MissingModelRefreshAllowed = $DatabaseAgeHours -ge $MinimumMissingModelRefreshAgeHours
+
+    if (
+        $MissingValidModelsBeforeRefresh.Count -gt 0 -and
+        -not $DatabaseNeedsDownload -and
+        $MissingModelRefreshAllowed
+    ) {
         Write-DeviceDetectiveLog `
             -Level "WARNING" `
-            -Message "$($UnresolvedBeforeRefresh.Count) device(s) were unresolved. Refreshing the database once and retrying lookup."
+            -Message "$($MissingValidModelsBeforeRefresh.Count) valid VID/PID model(s) were not found in the local database. The cache is $([math]::Round($DatabaseAgeHours, 1)) hour(s) old, so the database will be refreshed once and lookup retried."
 
         try {
             $DatabaseResult = Install-DeviceDatabase
             Set-DeviceDetectiveProperty -Name $CustomFields.DatabaseHash -Value $DatabaseResult.Hash -Type "Text"
-            $DatabaseRefreshedForUnknown = $true
+            $DatabaseRefreshedForMissingModel = $true
             $DatabaseNeedsDownload = $true
 
             $Database = @(Import-DeviceDatabase -Path $DatabasePath)
@@ -650,8 +695,13 @@ try {
         catch {
             Write-DeviceDetectiveLog `
                 -Level "WARNING" `
-                -Message "Database refresh for unresolved devices failed. Continuing with the trusted local results. Error: $($_.Exception.Message)"
+                -Message "Database refresh for missing VID/PID models failed. Continuing with the trusted local results. Error: $($_.Exception.Message)"
         }
+    }
+    elseif ($MissingValidModelsBeforeRefresh.Count -gt 0 -and -not $DatabaseNeedsDownload) {
+        Write-DeviceDetectiveLog `
+            -Level "WARNING" `
+            -Message "$($MissingValidModelsBeforeRefresh.Count) valid VID/PID model(s) were not found, but the database cache is only $([math]::Round($DatabaseAgeHours, 1)) hour(s) old. Skipping GitHub refresh to prevent repeated downloads."
     }
 
     $Status = Get-InventoryStatus -Devices $CurrentDevices
@@ -699,7 +749,9 @@ try {
         "Valid VID/PID product rows: $($DatabaseResult.ProductRows)"
         "Requested action: $Action"
         "GitHub contacted: $DatabaseNeedsDownload"
-        "Database refreshed because of unresolved devices: $DatabaseRefreshedForUnknown"
+        "Database refreshed because valid VID/PID models were missing: $DatabaseRefreshedForMissingModel"
+        "Database age before missing-model refresh check: $([math]::Round($DatabaseAgeHours, 1)) hours"
+        "Minimum age before automatic missing-model refresh: $MinimumMissingModelRefreshAgeHours hours"
         ""
         "Baseline comparison and alert-state persistence are not enabled in this version."
     ) -join [Environment]::NewLine
