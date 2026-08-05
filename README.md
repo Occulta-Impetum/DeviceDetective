@@ -1,6 +1,3 @@
-Below is a ready-to-paste `README.md` that reflects the project’s current state without claiming the unfinished NinjaOne alerting and Zendesk portions are complete.
-
-````markdown
 # Device Detective
 
 Device Detective is a PowerShell-based endpoint monitoring tool designed to run through NinjaOne.
