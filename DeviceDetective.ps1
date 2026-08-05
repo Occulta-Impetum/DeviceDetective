@@ -1,18 +1,20 @@
 <#
 .SYNOPSIS
-    Device Detective proof-of-concept for NinjaOne.
+    Device Detective for NinjaOne.
 
 .DESCRIPTION
-    This initial version:
+    This development version:
       - Reads the GitHub database URL from a NinjaOne script variable
       - Creates the local Device Detective working directory
-      - Downloads and validates device-database.csv
-      - Uses an atomic replacement process
-      - Calculates the database SHA-256 hash
-      - Reads the Device Detective Action custom field
-      - Writes test results to NinjaOne custom fields
+      - Downloads, validates, caches, and hash-checks device-database.csv
+      - Enumerates currently present Mouse, Keyboard, and HIDClass devices
+      - Extracts and normalizes VID/PID values when available
+      - Consolidates duplicate interfaces representing the same device model
+      - Resolves friendly names and classifications from the local database
+      - Refreshes the database once when an unresolved device is detected
+      - Writes the current inventory and summary to NinjaOne custom fields
 
-    This version does not yet enumerate or compare connected devices.
+    Baseline comparison and alert-state persistence are not enabled yet.
 
 .NINJAONE SCRIPT VARIABLE
     Name: GitHub URL
@@ -54,12 +56,17 @@ $ValidClassifications = @(
 )
 
 $CustomFields = @{
-    Action       = "deviceDetectiveAction"
-    DatabaseHash = "deviceDetectiveDatabaseHash"
-    Details      = "deviceDetectiveDetails"
-    LastRun      = "deviceDetectiveLastRun"
-    Status       = "deviceDetectiveStatus"
+    Action         = "deviceDetectiveAction"
+    Baseline       = "deviceDetectiveBaseline"
+    CurrentDevices = "deviceDetectiveCurrentDevices"
+    DatabaseHash   = "deviceDetectiveDatabaseHash"
+    Details        = "deviceDetectiveDetails"
+    LastRun        = "deviceDetectiveLastRun"
+    Status         = "deviceDetectiveStatus"
 }
+
+# Prevent excessively large values from being written to multiline fields.
+$MaximumMultiLineLength = 9000
 
 # ---------------------------------------------------------------------------
 # Functions
@@ -128,6 +135,22 @@ function Set-DeviceDetectiveProperty {
     catch {
         throw "Unable to update NinjaOne custom field '$Name': $($_.Exception.Message)"
     }
+}
+
+function Limit-MultiLineValue {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()]
+        [Parameter(Mandatory)]
+        [string]$Value
+    )
+
+    if ($Value.Length -le $MaximumMultiLineLength) {
+        return $Value
+    }
+
+    $Suffix = "`r`n`r`n[Output truncated by Device Detective.]"
+    return $Value.Substring(0, $MaximumMultiLineLength - $Suffix.Length) + $Suffix
 }
 
 function Test-DeviceDatabase {
@@ -260,6 +283,237 @@ function Install-DeviceDatabase {
     }
 }
 
+function Import-DeviceDatabase {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $Rows = @(Import-Csv -LiteralPath $Path)
+
+    foreach ($Row in $Rows) {
+        if ($Row.VendorID -match '^[0-9A-Fa-f]{4}$') {
+            $Row.VendorID = $Row.VendorID.ToUpperInvariant()
+        }
+
+        if ($Row.ProductID -match '^[0-9A-Fa-f]{4}$') {
+            $Row.ProductID = $Row.ProductID.ToUpperInvariant()
+        }
+    }
+
+    return $Rows
+}
+
+function Get-CurrentDeviceModels {
+    [CmdletBinding()]
+    param()
+
+    Write-DeviceDetectiveLog "Collecting currently present Mouse, Keyboard, and HIDClass devices."
+
+    try {
+        $AllDevices = @(Get-PnpDevice -PresentOnly -Class Mouse, Keyboard, HIDClass -ErrorAction Stop)
+    }
+    catch {
+        throw "Unable to enumerate Plug and Play devices: $($_.Exception.Message)"
+    }
+
+    $UniqueDevices = @{}
+
+    foreach ($Device in $AllDevices) {
+        $InstanceID = [string]$Device.InstanceId
+
+        if ([string]::IsNullOrWhiteSpace($InstanceID)) {
+            continue
+        }
+
+        $InstanceParts = $InstanceID -split '\\', 3
+        $DeviceInformation = if ($InstanceParts.Count -ge 2) {
+            $InstanceParts[1]
+        }
+        else {
+            $InstanceID
+        }
+
+        $VendorID = $null
+        $ProductID = $null
+        $IsStandardVidPid = $false
+
+        if ($InstanceID -match '(?i)VID_([0-9A-F]{4})&PID_([0-9A-F]{4})') {
+            $VendorID = $Matches[1].ToUpperInvariant()
+            $ProductID = $Matches[2].ToUpperInvariant()
+            $IsStandardVidPid = $true
+        }
+        else {
+            # Preserve the behavior of the original script for devices that do
+            # not expose normal USB VID/PID values, including some Bluetooth HID devices.
+            $CandidateVendor = (($DeviceInformation -split '&')[0] -replace '(?i)^VID_', '').Trim()
+
+            if (-not [string]::IsNullOrWhiteSpace($CandidateVendor)) {
+                $VendorID = $CandidateVendor.ToUpperInvariant()
+            }
+        }
+
+        # The original script excluded internal Intel HID records.
+        if (-not [string]::IsNullOrWhiteSpace($VendorID) -and $VendorID.StartsWith('INTC')) {
+            continue
+        }
+
+        $UniqueKey = if ($IsStandardVidPid) {
+            "$VendorID|$ProductID"
+        }
+        else {
+            "NONSTANDARD|$DeviceInformation"
+        }
+
+        if ($UniqueDevices.ContainsKey($UniqueKey)) {
+            continue
+        }
+
+        $UniqueDevices[$UniqueKey] = [PSCustomObject]@{
+            VendorID       = $VendorID
+            VendorName     = ""
+            ProductID      = $ProductID
+            ProductName    = ""
+            Classification = "Unknown"
+            Notes           = ""
+            FullDeviceData  = $DeviceInformation
+            FriendlyName    = [string]$Device.FriendlyName
+            PnpClass        = [string]$Device.Class
+            InstanceID      = $InstanceID
+            LookupMatched   = $false
+        }
+    }
+
+    $Results = @($UniqueDevices.Values | Sort-Object VendorID, ProductID, FullDeviceData)
+    Write-DeviceDetectiveLog "Collected $($Results.Count) unique monitored device models."
+    return $Results
+}
+
+function Resolve-DeviceModels {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [array]$Devices,
+
+        [Parameter(Mandatory)]
+        [array]$Database
+    )
+
+    $ProductRows = @(
+        $Database | Where-Object {
+            $_.VendorID -match '^[0-9A-F]{4}$' -and
+            $_.ProductID -match '^[0-9A-F]{4}$'
+        }
+    )
+
+    $VendorRows = @(
+        $Database | Where-Object {
+            $_.VendorID -match '^[0-9A-F]{4}$' -and
+            [string]::IsNullOrWhiteSpace($_.ProductID)
+        }
+    )
+
+    foreach ($Device in $Devices) {
+        if ($Device.VendorID -match '^[0-9A-F]{4}$' -and $Device.ProductID -match '^[0-9A-F]{4}$') {
+            $MatchesForProduct = @(
+                $ProductRows | Where-Object {
+                    $_.VendorID -eq $Device.VendorID -and
+                    $_.ProductID -eq $Device.ProductID
+                }
+            )
+
+            if ($MatchesForProduct.Count -gt 0) {
+                # Prefer a row with an explicit classification when duplicates exist.
+                $Match = @($MatchesForProduct | Sort-Object {
+                    if ([string]::IsNullOrWhiteSpace($_.Classification)) { 1 } else { 0 }
+                })[0]
+
+                $Device.VendorName = [string]$Match.VendorName
+                $Device.ProductName = [string]$Match.ProductName
+                $Device.Classification = if ([string]::IsNullOrWhiteSpace($Match.Classification)) {
+                    "Known"
+                }
+                else {
+                    [string]$Match.Classification
+                }
+                $Device.Notes = [string]$Match.Notes
+                $Device.LookupMatched = $true
+                continue
+            }
+
+            $VendorMatch = @($VendorRows | Where-Object { $_.VendorID -eq $Device.VendorID } | Select-Object -First 1)
+
+            if ($VendorMatch.Count -gt 0) {
+                $Device.VendorName = [string]$VendorMatch[0].VendorName
+            }
+            else {
+                $Device.VendorName = "Not found"
+            }
+
+            $Device.ProductName = "Not found"
+            $Device.Classification = "Unknown"
+            continue
+        }
+
+        # Nonstandard identifiers cannot be matched safely to a VID/PID model.
+        $Device.VendorName = "Not found"
+        $Device.ProductName = if ([string]::IsNullOrWhiteSpace($Device.FriendlyName)) {
+            "Not found"
+        }
+        else {
+            $Device.FriendlyName
+        }
+        $Device.Classification = "Unknown"
+    }
+
+    return $Devices
+}
+
+function Format-CurrentDevices {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [array]$Devices
+    )
+
+    $Blocks = foreach ($Device in $Devices) {
+        $VendorID = if ([string]::IsNullOrWhiteSpace([string]$Device.VendorID)) { "N/A" } else { $Device.VendorID }
+        $ProductID = if ([string]::IsNullOrWhiteSpace([string]$Device.ProductID)) { "N/A" } else { $Device.ProductID }
+        $VendorName = if ([string]::IsNullOrWhiteSpace([string]$Device.VendorName)) { "Not found" } else { $Device.VendorName }
+        $ProductName = if ([string]::IsNullOrWhiteSpace([string]$Device.ProductName)) { "Not found" } else { $Device.ProductName }
+
+        @(
+            "Classification: $($Device.Classification)"
+            "VendorID: $VendorID"
+            "VendorName: $VendorName"
+            "ProductID: $ProductID"
+            "ProductName: $ProductName"
+            "Device data: $($Device.FullDeviceData)"
+        ) -join [Environment]::NewLine
+    }
+
+    return ($Blocks -join ([Environment]::NewLine + [Environment]::NewLine))
+}
+
+function Get-InventoryStatus {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [array]$Devices
+    )
+
+    if (@($Devices | Where-Object { $_.Classification -eq "Prohibited" }).Count -gt 0) {
+        return "Prohibited Device"
+    }
+
+    if (@($Devices | Where-Object { $_.Classification -in @("Known", "Unknown") }).Count -gt 0) {
+        return "Review Required"
+    }
+
+    return "Normal"
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -276,11 +530,9 @@ try {
         New-Item -Path $RootPath -ItemType Directory -Force | Out-Null
     }
 
-    Write-DeviceDetectiveLog "Starting Device Detective proof-of-concept."
+    Write-DeviceDetectiveLog "Starting Device Detective development build."
 
-    $Action = Get-DeviceDetectiveProperty `
-        -Name $CustomFields.Action `
-        -Type "Dropdown"
+    $Action = Get-DeviceDetectiveProperty -Name $CustomFields.Action -Type "Dropdown"
 
     if ([string]::IsNullOrWhiteSpace([string]$Action)) {
         $Action = "None"
@@ -300,18 +552,18 @@ try {
             Write-DeviceDetectiveLog "A local-data reset was requested."
 
             Get-ChildItem -LiteralPath $RootPath -File -ErrorAction SilentlyContinue |
-                Where-Object {
-                    $_.FullName -ne $LogPath
-                } |
+                Where-Object { $_.FullName -ne $LogPath } |
                 Remove-Item -Force -ErrorAction Stop
 
+            Set-DeviceDetectiveProperty -Name $CustomFields.Baseline -Value "" -Type "MultiLine"
+            Set-DeviceDetectiveProperty -Name $CustomFields.CurrentDevices -Value "" -Type "MultiLine"
             $ForceDatabaseRefresh = $true
         }
 
         "Approve Current Baseline" {
             Write-DeviceDetectiveLog `
                 -Level "WARNING" `
-                -Message "Baseline approval is not implemented in this proof-of-concept."
+                -Message "Baseline approval is not implemented in this development version."
         }
 
         "None" {
@@ -319,16 +571,11 @@ try {
         }
 
         default {
-            Write-DeviceDetectiveLog `
-                -Level "WARNING" `
-                -Message "Unrecognized action value: $Action"
+            Write-DeviceDetectiveLog -Level "WARNING" -Message "Unrecognized action value: $Action"
         }
     }
 
-    $TrustedHash = Get-DeviceDetectiveProperty `
-        -Name $CustomFields.DatabaseHash `
-        -Type "Text"
-
+    $TrustedHash = Get-DeviceDetectiveProperty -Name $CustomFields.DatabaseHash -Type "Text"
     $DatabaseNeedsDownload = $ForceDatabaseRefresh
 
     if (-not (Test-Path -LiteralPath $DatabasePath -PathType Leaf)) {
@@ -369,11 +616,7 @@ try {
 
     if ($DatabaseNeedsDownload) {
         $DatabaseResult = Install-DeviceDatabase
-
-        Set-DeviceDetectiveProperty `
-            -Name $CustomFields.DatabaseHash `
-            -Value $DatabaseResult.Hash `
-            -Type "Text"
+        Set-DeviceDetectiveProperty -Name $CustomFields.DatabaseHash -Value $DatabaseResult.Hash -Type "Text"
     }
     else {
         $DatabaseResult = [PSCustomObject]@{
@@ -383,8 +626,72 @@ try {
         }
     }
 
+    $Database = @(Import-DeviceDatabase -Path $DatabasePath)
+    $CurrentDevices = @(Get-CurrentDeviceModels)
+    $CurrentDevices = @(Resolve-DeviceModels -Devices $CurrentDevices -Database $Database)
+
+    $DatabaseRefreshedForUnknown = $false
+    $UnresolvedBeforeRefresh = @($CurrentDevices | Where-Object { -not $_.LookupMatched })
+
+    if ($UnresolvedBeforeRefresh.Count -gt 0 -and -not $DatabaseNeedsDownload) {
+        Write-DeviceDetectiveLog `
+            -Level "WARNING" `
+            -Message "$($UnresolvedBeforeRefresh.Count) device(s) were unresolved. Refreshing the database once and retrying lookup."
+
+        try {
+            $DatabaseResult = Install-DeviceDatabase
+            Set-DeviceDetectiveProperty -Name $CustomFields.DatabaseHash -Value $DatabaseResult.Hash -Type "Text"
+            $DatabaseRefreshedForUnknown = $true
+            $DatabaseNeedsDownload = $true
+
+            $Database = @(Import-DeviceDatabase -Path $DatabasePath)
+            $CurrentDevices = @(Resolve-DeviceModels -Devices $CurrentDevices -Database $Database)
+        }
+        catch {
+            Write-DeviceDetectiveLog `
+                -Level "WARNING" `
+                -Message "Database refresh for unresolved devices failed. Continuing with the trusted local results. Error: $($_.Exception.Message)"
+        }
+    }
+
+    $Status = Get-InventoryStatus -Devices $CurrentDevices
+    $CurrentDeviceText = Limit-MultiLineValue -Value (Format-CurrentDevices -Devices $CurrentDevices)
+
+    $ApprovedCount = @($CurrentDevices | Where-Object { $_.Classification -eq "Approved" }).Count
+    $KnownCount = @($CurrentDevices | Where-Object { $_.Classification -eq "Known" }).Count
+    $UnknownCount = @($CurrentDevices | Where-Object { $_.Classification -eq "Unknown" }).Count
+    $ProhibitedCount = @($CurrentDevices | Where-Object { $_.Classification -eq "Prohibited" }).Count
+    $IgnoredCount = @($CurrentDevices | Where-Object { $_.Classification -eq "Ignored" }).Count
+
+    $ReviewDevices = @(
+        $CurrentDevices | Where-Object { $_.Classification -in @("Known", "Unknown", "Prohibited") }
+    )
+
+    $ReviewSummary = if ($ReviewDevices.Count -eq 0) {
+        "No devices currently require review."
+    }
+    else {
+        @(
+            "Devices requiring review:"
+            $ReviewDevices | ForEach-Object {
+                $VidPid = if ($_.ProductID) { "$($_.VendorID)/$($_.ProductID)" } else { [string]$_.VendorID }
+                "- $($_.Classification): $VidPid - $($_.VendorName) / $($_.ProductName)"
+            }
+        ) -join [Environment]::NewLine
+    }
+
     $Details = @(
-        "Device Detective proof-of-concept completed successfully."
+        "Device Detective device inventory completed successfully."
+        ""
+        "Status: $Status"
+        "Unique monitored device models: $($CurrentDevices.Count)"
+        "Approved: $ApprovedCount"
+        "Known: $KnownCount"
+        "Unknown: $UnknownCount"
+        "Prohibited: $ProhibitedCount"
+        "Ignored: $IgnoredCount"
+        ""
+        $ReviewSummary
         ""
         "Database path: $DatabasePath"
         "Database hash: $($DatabaseResult.Hash)"
@@ -392,18 +699,24 @@ try {
         "Valid VID/PID product rows: $($DatabaseResult.ProductRows)"
         "Requested action: $Action"
         "GitHub contacted: $DatabaseNeedsDownload"
+        "Database refreshed because of unresolved devices: $DatabaseRefreshedForUnknown"
         ""
-        "Device detection and baseline comparison are not enabled in this version."
+        "Baseline comparison and alert-state persistence are not enabled in this version."
     ) -join [Environment]::NewLine
 
     Set-DeviceDetectiveProperty `
+        -Name $CustomFields.CurrentDevices `
+        -Value $CurrentDeviceText `
+        -Type "MultiLine"
+
+    Set-DeviceDetectiveProperty `
         -Name $CustomFields.Status `
-        -Value "Normal" `
+        -Value $Status `
         -Type "Dropdown"
 
     Set-DeviceDetectiveProperty `
         -Name $CustomFields.Details `
-        -Value $Details `
+        -Value (Limit-MultiLineValue -Value $Details) `
         -Type "MultiLine"
 
     Set-DeviceDetectiveProperty `
@@ -412,37 +725,23 @@ try {
         -Type "DateTime"
 
     if ($Action -in @("Refresh Database", "Reset Local Data")) {
-        Set-DeviceDetectiveProperty `
-            -Name $CustomFields.Action `
-            -Value "None" `
-            -Type "Dropdown"
+        Set-DeviceDetectiveProperty -Name $CustomFields.Action -Value "None" -Type "Dropdown"
     }
 
-    Write-DeviceDetectiveLog "Proof-of-concept completed successfully."
+    Write-DeviceDetectiveLog "Device inventory completed successfully with status '$Status'."
     exit 0
 }
 catch {
     $ErrorMessage = $_.Exception.Message
-
-    Write-DeviceDetectiveLog `
-        -Level "ERROR" `
-        -Message $ErrorMessage
+    Write-DeviceDetectiveLog -Level "ERROR" -Message $ErrorMessage
 
     try {
-        Set-DeviceDetectiveProperty `
-            -Name $CustomFields.Status `
-            -Value "Error" `
-            -Type "Dropdown"
-
+        Set-DeviceDetectiveProperty -Name $CustomFields.Status -Value "Error" -Type "Dropdown"
         Set-DeviceDetectiveProperty `
             -Name $CustomFields.Details `
-            -Value "Device Detective proof-of-concept failed.`n`n$ErrorMessage" `
+            -Value (Limit-MultiLineValue -Value "Device Detective failed.`n`n$ErrorMessage") `
             -Type "MultiLine"
-
-        Set-DeviceDetectiveProperty `
-            -Name $CustomFields.LastRun `
-            -Value $RunTime `
-            -Type "DateTime"
+        Set-DeviceDetectiveProperty -Name $CustomFields.LastRun -Value $RunTime -Type "DateTime"
     }
     catch {
         Write-Error "Unable to write the failure to NinjaOne custom fields: $($_.Exception.Message)"
