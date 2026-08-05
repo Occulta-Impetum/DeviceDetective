@@ -1017,11 +1017,11 @@ try {
     )
 
     $ReviewSummary = if ($ReviewDevices.Count -eq 0) {
-        "No devices currently require review."
+        "No non-approved devices are present in the current inventory."
     }
     else {
         @(
-            "Devices requiring review:"
+            "Non-approved devices in current inventory:"
             $ReviewDevices | ForEach-Object {
                 $VidPid = if ($_.ProductID) { "$($_.VendorID)/$($_.ProductID)" } else { [string]$_.VendorID }
                 "- $($_.Classification): $VidPid - $($_.VendorName) / $($_.ProductName)"
@@ -1103,6 +1103,21 @@ try {
 
     $BaselineChangeSummary = Format-BaselineChanges -Comparison $ReportedBaselineComparison
 
+    $ReviewContextSummary = if (
+        $ReviewDevices.Count -gt 0 -and
+        $BaselineExists -and
+        $ReportedBaselineComparison.Matches -and
+        $Status -eq "Normal"
+    ) {
+        "These non-approved devices are part of the accepted baseline for this computer."
+    }
+    elseif ($ReviewDevices.Count -gt 0) {
+        "These devices are not globally approved and the current inventory requires review."
+    }
+    else {
+        $null
+    }
+
     $Details = @(
         "Device Detective device inventory and baseline evaluation completed successfully."
         ""
@@ -1115,6 +1130,7 @@ try {
         "Ignored: $IgnoredCount"
         ""
         $ReviewSummary
+        $ReviewContextSummary
         ""
         "Baseline exists: $BaselineExists"
         $BaselineActionSummary
