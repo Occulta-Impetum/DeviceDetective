@@ -643,9 +643,11 @@ function Compare-BaselineRecords {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [array]$BaselineRecords,
 
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [array]$CurrentRecords
     )
 
