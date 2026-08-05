@@ -14,8 +14,11 @@
       - Resolves friendly names and classifications from the local database
       - Refreshes the database only for valid VID/PID models missing from the cache
       - Writes the current inventory and summary to NinjaOne custom fields
-
-    Baseline comparison and alert-state persistence are not enabled yet.
+      - Creates and maintains an accepted device baseline
+      - Automatically accepts states containing only Approved or Ignored models
+      - Supports manual baseline approval through a NinjaOne action field
+      - Rejects manual baseline approval when a Prohibited model is present
+      - Reports added, removed, and reclassified models in the details field
 
 .NINJAONE SCRIPT VARIABLE
     Name: GitHub URL
@@ -531,6 +534,232 @@ function Format-CurrentDevices {
     return ($Blocks -join ([Environment]::NewLine + [Environment]::NewLine))
 }
 
+
+function Get-DeviceIdentityKey {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Device
+    )
+
+    if (
+        [string]$Device.VendorID -match '^[0-9A-Fa-f]{4}$' -and
+        [string]$Device.ProductID -match '^[0-9A-Fa-f]{4}$'
+    ) {
+        return ("VIDPID|{0}|{1}" -f (
+            [string]$Device.VendorID
+        ).ToUpperInvariant(), (
+            [string]$Device.ProductID
+        ).ToUpperInvariant())
+    }
+
+    $Fallback = [string]$Device.FullDeviceData
+
+    if ([string]::IsNullOrWhiteSpace($Fallback)) {
+        $Fallback = [string]$Device.InstanceID
+    }
+
+    return "NONSTANDARD|$Fallback"
+}
+
+function ConvertTo-BaselineRecords {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [array]$Devices
+    )
+
+    $Records = foreach ($Device in $Devices) {
+        # Ignored models remain visible in Current Devices but are intentionally
+        # excluded from the accepted baseline and change comparison.
+        if ([string]$Device.Classification -eq 'Ignored') {
+            continue
+        }
+
+        [PSCustomObject]@{
+            Key            = Get-DeviceIdentityKey -Device $Device
+            Classification = [string]$Device.Classification
+            VendorID       = [string]$Device.VendorID
+            ProductID      = [string]$Device.ProductID
+            VendorName     = [string]$Device.VendorName
+            ProductName    = [string]$Device.ProductName
+            FullDeviceData = [string]$Device.FullDeviceData
+        }
+    }
+
+    return @($Records | Sort-Object Key)
+}
+
+function ConvertTo-BaselineValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [array]$Records
+    )
+
+    $Value = if ($Records.Count -eq 0) {
+        "[]"
+    }
+    else {
+        @($Records) | ConvertTo-Json -Depth 4
+    }
+
+    if ($Value.Length -gt $MaximumMultiLineLength) {
+        throw "The accepted baseline is too large for the NinjaOne multiline field. Required length: $($Value.Length); configured maximum: $MaximumMultiLineLength."
+    }
+
+    return $Value
+}
+
+function ConvertFrom-BaselineValue {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()]
+        [Parameter(Mandatory)]
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return @()
+    }
+
+    try {
+        $Parsed = @($Value | ConvertFrom-Json -ErrorAction Stop)
+    }
+    catch {
+        throw "The Device Detective baseline custom field does not contain valid baseline JSON: $($_.Exception.Message)"
+    }
+
+    foreach ($Record in $Parsed) {
+        if ([string]::IsNullOrWhiteSpace([string]$Record.Key)) {
+            throw 'The Device Detective baseline contains a record without an identity key.'
+        }
+    }
+
+    return @($Parsed | Sort-Object Key)
+}
+
+function Compare-BaselineRecords {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [array]$BaselineRecords,
+
+        [Parameter(Mandatory)]
+        [array]$CurrentRecords
+    )
+
+    $BaselineByKey = @{}
+    $CurrentByKey = @{}
+
+    foreach ($Record in $BaselineRecords) {
+        $BaselineByKey[[string]$Record.Key] = $Record
+    }
+
+    foreach ($Record in $CurrentRecords) {
+        $CurrentByKey[[string]$Record.Key] = $Record
+    }
+
+    $Added = @()
+    $Removed = @()
+    $Changed = @()
+
+    foreach ($Key in $CurrentByKey.Keys) {
+        if (-not $BaselineByKey.ContainsKey($Key)) {
+            $Added += $CurrentByKey[$Key]
+            continue
+        }
+
+        $Before = $BaselineByKey[$Key]
+        $After = $CurrentByKey[$Key]
+
+        if (
+            [string]$Before.Classification -ne [string]$After.Classification -or
+            [string]$Before.VendorName -ne [string]$After.VendorName -or
+            [string]$Before.ProductName -ne [string]$After.ProductName
+        ) {
+            $Changed += [PSCustomObject]@{
+                Key    = $Key
+                Before = $Before
+                After  = $After
+            }
+        }
+    }
+
+    foreach ($Key in $BaselineByKey.Keys) {
+        if (-not $CurrentByKey.ContainsKey($Key)) {
+            $Removed += $BaselineByKey[$Key]
+        }
+    }
+
+    return [PSCustomObject]@{
+        Matches = ($Added.Count -eq 0 -and $Removed.Count -eq 0 -and $Changed.Count -eq 0)
+        Added   = @($Added | Sort-Object Key)
+        Removed = @($Removed | Sort-Object Key)
+        Changed = @($Changed | Sort-Object Key)
+    }
+}
+
+function Format-BaselineDeviceSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Record
+    )
+
+    $Identifier = if (
+        [string]$Record.VendorID -match '^[0-9A-Fa-f]{4}$' -and
+        [string]$Record.ProductID -match '^[0-9A-Fa-f]{4}$'
+    ) {
+        "$($Record.VendorID)/$($Record.ProductID)"
+    }
+    else {
+        [string]$Record.Key
+    }
+
+    return "$($Record.Classification): $Identifier - $($Record.VendorName) / $($Record.ProductName)"
+}
+
+function Format-BaselineChanges {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Comparison
+    )
+
+    if ($Comparison.Matches) {
+        return 'Current devices match the accepted baseline.'
+    }
+
+    $Lines = @('Device state differs from the accepted baseline.')
+
+    if ($Comparison.Added.Count -gt 0) {
+        $Lines += ''
+        $Lines += 'Added:'
+        $Lines += @($Comparison.Added | ForEach-Object { '- ' + (Format-BaselineDeviceSummary -Record $_) })
+    }
+
+    if ($Comparison.Removed.Count -gt 0) {
+        $Lines += ''
+        $Lines += 'Removed:'
+        $Lines += @($Comparison.Removed | ForEach-Object { '- ' + (Format-BaselineDeviceSummary -Record $_) })
+    }
+
+    if ($Comparison.Changed.Count -gt 0) {
+        $Lines += ''
+        $Lines += 'Classification or friendly-name changes:'
+        $Lines += @($Comparison.Changed | ForEach-Object {
+            '- {0} -> {1}' -f (
+                Format-BaselineDeviceSummary -Record $_.Before
+            ), (
+                Format-BaselineDeviceSummary -Record $_.After
+            )
+        })
+    }
+
+    return ($Lines -join [Environment]::NewLine)
+}
+
 function Get-InventoryStatus {
     [CmdletBinding()]
     param(
@@ -591,13 +820,12 @@ try {
 
             Set-DeviceDetectiveProperty -Name $CustomFields.Baseline -Value "" -Type "MultiLine"
             Set-DeviceDetectiveProperty -Name $CustomFields.CurrentDevices -Value "" -Type "MultiLine"
+            Set-DeviceDetectiveProperty -Name $CustomFields.DatabaseHash -Value "" -Type "Text"
             $ForceDatabaseRefresh = $true
         }
 
         "Approve Current Baseline" {
-            Write-DeviceDetectiveLog `
-                -Level "WARNING" `
-                -Message "Baseline approval is not implemented in this development version."
+            Write-DeviceDetectiveLog "A current-baseline approval was requested."
         }
 
         "None" {
@@ -704,7 +932,7 @@ try {
             -Message "$($MissingValidModelsBeforeRefresh.Count) valid VID/PID model(s) were not found, but the database cache is only $([math]::Round($DatabaseAgeHours, 1)) hour(s) old. Skipping GitHub refresh to prevent repeated downloads."
     }
 
-    $Status = Get-InventoryStatus -Devices $CurrentDevices
+    $InventoryStatus = Get-InventoryStatus -Devices $CurrentDevices
     $CurrentDeviceText = Limit-MultiLineValue -Value (Format-CurrentDevices -Devices $CurrentDevices)
 
     $ApprovedCount = @($CurrentDevices | Where-Object { $_.Classification -eq "Approved" }).Count
@@ -730,8 +958,79 @@ try {
         ) -join [Environment]::NewLine
     }
 
+    $BaselineValue = [string](Get-DeviceDetectiveProperty -Name $CustomFields.Baseline -Type "MultiLine")
+    $BaselineExists = -not [string]::IsNullOrWhiteSpace($BaselineValue)
+    $BaselineRecords = @(ConvertFrom-BaselineValue -Value $BaselineValue)
+    $CurrentBaselineRecords = @(ConvertTo-BaselineRecords -Devices $CurrentDevices)
+    $BaselineComparison = Compare-BaselineRecords -BaselineRecords $BaselineRecords -CurrentRecords $CurrentBaselineRecords
+    $ReportedBaselineComparison = $BaselineComparison
+
+    $AllCurrentDevicesAutomaticallyAcceptable = @(
+        $CurrentDevices | Where-Object { $_.Classification -notin @("Approved", "Ignored") }
+    ).Count -eq 0
+
+    $BaselineActionSummary = "No baseline change was made."
+    $Status = $InventoryStatus
+    $ResetActionAfterRun = $Action -in @("Refresh Database", "Reset Local Data")
+
+    if ($Action -eq "Approve Current Baseline") {
+        $ResetActionAfterRun = $true
+
+        if ($ProhibitedCount -gt 0) {
+            $Status = "Prohibited Device"
+            $BaselineActionSummary = "Manual baseline approval was rejected because the current state contains a prohibited device."
+            Write-DeviceDetectiveLog -Level "WARNING" -Message $BaselineActionSummary
+        }
+        else {
+            $NewBaselineValue = ConvertTo-BaselineValue -Records $CurrentBaselineRecords
+            Set-DeviceDetectiveProperty -Name $CustomFields.Baseline -Value $NewBaselineValue -Type "MultiLine"
+            $BaselineRecords = $CurrentBaselineRecords
+            $BaselineExists = $true
+            $BaselineComparison = Compare-BaselineRecords -BaselineRecords $BaselineRecords -CurrentRecords $CurrentBaselineRecords
+            $Status = "Normal"
+            $BaselineActionSummary = "The current device state was accepted as the baseline through the NinjaOne approval action."
+            Write-DeviceDetectiveLog $BaselineActionSummary
+        }
+    }
+    elseif (-not $BaselineExists) {
+        if ($AllCurrentDevicesAutomaticallyAcceptable) {
+            $NewBaselineValue = ConvertTo-BaselineValue -Records $CurrentBaselineRecords
+            Set-DeviceDetectiveProperty -Name $CustomFields.Baseline -Value $NewBaselineValue -Type "MultiLine"
+            $BaselineRecords = $CurrentBaselineRecords
+            $BaselineExists = $true
+            $BaselineComparison = Compare-BaselineRecords -BaselineRecords $BaselineRecords -CurrentRecords $CurrentBaselineRecords
+            $Status = "Normal"
+            $BaselineActionSummary = "The initial baseline was created automatically because all current devices are Approved or Ignored."
+            Write-DeviceDetectiveLog $BaselineActionSummary
+        }
+        else {
+            $BaselineActionSummary = "No baseline exists. IT review is required before the current state can be accepted."
+        }
+    }
+    elseif ($BaselineComparison.Matches) {
+        # A manually accepted Known or Unknown model remains normal while the
+        # current state continues to match the accepted baseline.
+        $Status = if ($ProhibitedCount -gt 0) { "Prohibited Device" } else { "Normal" }
+        $BaselineActionSummary = "The current device state matches the accepted baseline."
+    }
+    elseif ($AllCurrentDevicesAutomaticallyAcceptable) {
+        $NewBaselineValue = ConvertTo-BaselineValue -Records $CurrentBaselineRecords
+        Set-DeviceDetectiveProperty -Name $CustomFields.Baseline -Value $NewBaselineValue -Type "MultiLine"
+        $BaselineRecords = $CurrentBaselineRecords
+        $BaselineComparison = Compare-BaselineRecords -BaselineRecords $BaselineRecords -CurrentRecords $CurrentBaselineRecords
+        $Status = "Normal"
+        $BaselineActionSummary = "The accepted baseline was updated automatically because all current devices are Approved or Ignored."
+        Write-DeviceDetectiveLog $BaselineActionSummary
+    }
+    else {
+        $Status = $InventoryStatus
+        $BaselineActionSummary = "The accepted baseline was retained because the changed state contains a Known, Unknown, or Prohibited device."
+    }
+
+    $BaselineChangeSummary = Format-BaselineChanges -Comparison $ReportedBaselineComparison
+
     $Details = @(
-        "Device Detective device inventory completed successfully."
+        "Device Detective device inventory and baseline evaluation completed successfully."
         ""
         "Status: $Status"
         "Unique monitored device models: $($CurrentDevices.Count)"
@@ -743,6 +1042,10 @@ try {
         ""
         $ReviewSummary
         ""
+        "Baseline exists: $BaselineExists"
+        $BaselineActionSummary
+        $BaselineChangeSummary
+        ""
         "Database path: $DatabasePath"
         "Database hash: $($DatabaseResult.Hash)"
         "Database rows: $($DatabaseResult.TotalRows)"
@@ -753,7 +1056,7 @@ try {
         "Database age before missing-model refresh check: $([math]::Round($DatabaseAgeHours, 1)) hours"
         "Minimum age before automatic missing-model refresh: $MinimumMissingModelRefreshAgeHours hours"
         ""
-        "Baseline comparison and alert-state persistence are not enabled in this version."
+        "Note: specialized reporting for keyboards or mice removed from otherwise unused computers is planned for a future version."
     ) -join [Environment]::NewLine
 
     Set-DeviceDetectiveProperty `
@@ -776,7 +1079,7 @@ try {
         -Value $RunTime `
         -Type "DateTime"
 
-    if ($Action -in @("Refresh Database", "Reset Local Data")) {
+    if ($ResetActionAfterRun) {
         Set-DeviceDetectiveProperty -Name $CustomFields.Action -Value "None" -Type "Dropdown"
     }
 
