@@ -113,7 +113,16 @@ function Get-DeviceDetectiveProperty {
     )
 
     try {
-        return Get-NinjaProperty -Name $Name -Type $Type
+        $PropertyValue = Get-NinjaProperty -Name $Name -Type $Type
+
+        # NinjaOne returns MultiLine custom fields as an Object[] containing
+        # one element per line. Reassemble those elements into the original
+        # text before returning the value to the rest of the script.
+        if ($Type -eq "MultiLine" -and $PropertyValue -is [System.Array]) {
+            return ([string[]]$PropertyValue -join [Environment]::NewLine)
+        }
+
+        return $PropertyValue
     }
     catch {
         throw "Unable to read NinjaOne custom field '$Name': $($_.Exception.Message)"
@@ -624,7 +633,8 @@ function ConvertFrom-BaselineValue {
     }
 
     try {
-        $Parsed = @($Value | ConvertFrom-Json -ErrorAction Stop)
+        $ParsedValue = ConvertFrom-Json -InputObject $Value -ErrorAction Stop
+        $Parsed = @($ParsedValue)
     }
     catch {
         throw "The Device Detective baseline custom field does not contain valid baseline JSON: $($_.Exception.Message)"
@@ -647,6 +657,17 @@ function Get-BaselineRecordKey {
         [object]$Record
     )
 
+    # Both newly detected records and records stored in the NinjaOne baseline
+    # already contain the canonical Key value. Prefer that value so the same
+    # identity is compared exactly as it was originally written.
+    $StoredKey = ([string]$Record.Key).Trim()
+
+    if (-not [string]::IsNullOrWhiteSpace($StoredKey)) {
+        return $StoredKey.ToUpperInvariant()
+    }
+
+    # Rebuild a standard key only as a compatibility fallback for an older or
+    # manually edited baseline that does not contain the Key property.
     $VendorID = ([string]$Record.VendorID).Trim().ToUpperInvariant()
     $ProductID = ([string]$Record.ProductID).Trim().ToUpperInvariant()
 
@@ -655,12 +676,6 @@ function Get-BaselineRecordKey {
         $ProductID -match '^[0-9A-F]{4}$'
     ) {
         return "VIDPID|$VendorID|$ProductID"
-    }
-
-    $StoredKey = ([string]$Record.Key).Trim()
-
-    if (-not [string]::IsNullOrWhiteSpace($StoredKey)) {
-        return $StoredKey.ToUpperInvariant()
     }
 
     $Fallback = ([string]$Record.FullDeviceData).Trim()
@@ -722,10 +737,17 @@ function Compare-BaselineRecords {
         $Before = $BaselineByKey[$Key]
         $After = $CurrentByKey[$Key]
 
+        $BeforeClassification = ([string]$Before.Classification).Trim()
+        $AfterClassification = ([string]$After.Classification).Trim()
+        $BeforeVendorName = ([string]$Before.VendorName).Trim()
+        $AfterVendorName = ([string]$After.VendorName).Trim()
+        $BeforeProductName = ([string]$Before.ProductName).Trim()
+        $AfterProductName = ([string]$After.ProductName).Trim()
+
         if (
-            [string]$Before.Classification -ne [string]$After.Classification -or
-            [string]$Before.VendorName -ne [string]$After.VendorName -or
-            [string]$Before.ProductName -ne [string]$After.ProductName
+            -not $BeforeClassification.Equals($AfterClassification, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not $BeforeVendorName.Equals($AfterVendorName, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not $BeforeProductName.Equals($AfterProductName, [System.StringComparison]::OrdinalIgnoreCase)
         ) {
             $Changed += [PSCustomObject]@{
                 Key    = $Key
@@ -1062,7 +1084,7 @@ try {
         # A manually accepted Known or Unknown model remains normal while the
         # current state continues to match the accepted baseline.
         $Status = if ($ProhibitedCount -gt 0) { "Prohibited Device" } else { "Normal" }
-        $BaselineActionSummary = "The current device state matches the accepted baseline."
+        $BaselineActionSummary = "No baseline change was made."
     }
     elseif ($AllCurrentDevicesAutomaticallyAcceptable) {
         $NewBaselineValue = ConvertTo-BaselineValue -Records $CurrentBaselineRecords
