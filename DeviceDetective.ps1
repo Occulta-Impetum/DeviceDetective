@@ -639,6 +639,51 @@ function ConvertFrom-BaselineValue {
     return @($Parsed | Sort-Object Key)
 }
 
+
+function Get-BaselineRecordKey {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Record
+    )
+
+    $VendorID = ([string]$Record.VendorID).Trim().ToUpperInvariant()
+    $ProductID = ([string]$Record.ProductID).Trim().ToUpperInvariant()
+
+    if (
+        $VendorID -match '^[0-9A-F]{4}$' -and
+        $ProductID -match '^[0-9A-F]{4}$'
+    ) {
+        return "VIDPID|$VendorID|$ProductID"
+    }
+
+    $StoredKey = ([string]$Record.Key).Trim()
+
+    if (-not [string]::IsNullOrWhiteSpace($StoredKey)) {
+        return $StoredKey.ToUpperInvariant()
+    }
+
+    $Fallback = ([string]$Record.FullDeviceData).Trim()
+
+    if ([string]::IsNullOrWhiteSpace($Fallback)) {
+        throw 'A baseline record does not contain enough information to create an identity key.'
+    }
+
+    return "NONSTANDARD|$($Fallback.ToUpperInvariant())"
+}
+
+function New-MatchingBaselineComparison {
+    [CmdletBinding()]
+    param()
+
+    return [PSCustomObject]@{
+        Matches = $true
+        Added   = @()
+        Removed = @()
+        Changed = @()
+    }
+}
+
 function Compare-BaselineRecords {
     [CmdletBinding()]
     param(
@@ -655,11 +700,13 @@ function Compare-BaselineRecords {
     $CurrentByKey = @{}
 
     foreach ($Record in $BaselineRecords) {
-        $BaselineByKey[[string]$Record.Key] = $Record
+        $NormalizedKey = Get-BaselineRecordKey -Record $Record
+        $BaselineByKey[$NormalizedKey] = $Record
     }
 
     foreach ($Record in $CurrentRecords) {
-        $CurrentByKey[[string]$Record.Key] = $Record
+        $NormalizedKey = Get-BaselineRecordKey -Record $Record
+        $CurrentByKey[$NormalizedKey] = $Record
     }
 
     $Added = @()
@@ -988,7 +1035,8 @@ try {
             Set-DeviceDetectiveProperty -Name $CustomFields.Baseline -Value $NewBaselineValue -Type "MultiLine"
             $BaselineRecords = $CurrentBaselineRecords
             $BaselineExists = $true
-            $BaselineComparison = Compare-BaselineRecords -BaselineRecords $BaselineRecords -CurrentRecords $CurrentBaselineRecords
+            $BaselineComparison = New-MatchingBaselineComparison
+            $ReportedBaselineComparison = $BaselineComparison
             $Status = "Normal"
             $BaselineActionSummary = "The current device state was accepted as the baseline through the NinjaOne approval action."
             Write-DeviceDetectiveLog $BaselineActionSummary
@@ -1000,7 +1048,8 @@ try {
             Set-DeviceDetectiveProperty -Name $CustomFields.Baseline -Value $NewBaselineValue -Type "MultiLine"
             $BaselineRecords = $CurrentBaselineRecords
             $BaselineExists = $true
-            $BaselineComparison = Compare-BaselineRecords -BaselineRecords $BaselineRecords -CurrentRecords $CurrentBaselineRecords
+            $BaselineComparison = New-MatchingBaselineComparison
+            $ReportedBaselineComparison = $BaselineComparison
             $Status = "Normal"
             $BaselineActionSummary = "The initial baseline was created automatically because all current devices are Approved or Ignored."
             Write-DeviceDetectiveLog $BaselineActionSummary
@@ -1019,7 +1068,8 @@ try {
         $NewBaselineValue = ConvertTo-BaselineValue -Records $CurrentBaselineRecords
         Set-DeviceDetectiveProperty -Name $CustomFields.Baseline -Value $NewBaselineValue -Type "MultiLine"
         $BaselineRecords = $CurrentBaselineRecords
-        $BaselineComparison = Compare-BaselineRecords -BaselineRecords $BaselineRecords -CurrentRecords $CurrentBaselineRecords
+        $BaselineComparison = New-MatchingBaselineComparison
+        $ReportedBaselineComparison = $BaselineComparison
         $Status = "Normal"
         $BaselineActionSummary = "The accepted baseline was updated automatically because all current devices are Approved or Ignored."
         Write-DeviceDetectiveLog $BaselineActionSummary
