@@ -136,6 +136,7 @@ Create the following device custom fields:
 | Device Detective Status          | `deviceDetectiveStatus`         | Drop-down  |
 
 Scripts must have permission to read and write these fields.
+Technicians should be allowed to read and write to Device Detective Action and only read the rest of the fields.
 
 ### Action values
 
