@@ -440,6 +440,7 @@ function Resolve-DeviceModels {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [array]$Devices,
 
         [Parameter(Mandatory)]
@@ -520,6 +521,7 @@ function Format-CurrentDevices {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [array]$Devices
     )
 
@@ -575,6 +577,7 @@ function ConvertTo-BaselineRecords {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [array]$Devices
     )
 
@@ -603,6 +606,7 @@ function ConvertTo-BaselineValue {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [array]$Records
     )
 
@@ -835,6 +839,7 @@ function Get-InventoryStatus {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [array]$Devices
     )
 
@@ -1016,7 +1021,12 @@ try {
         $CurrentDevices | Where-Object { $_.Classification -in @("Known", "Unknown", "Prohibited") }
     )
 
-    $ReviewSummary = if ($ReviewDevices.Count -eq 0) {
+    $NoCurrentDevices = $CurrentDevices.Count -eq 0
+
+    $ReviewSummary = if ($NoCurrentDevices) {
+        "No Mouse, Keyboard, or HIDClass device models were detected in the current inventory."
+    }
+    elseif ($ReviewDevices.Count -eq 0) {
         "No non-approved devices are present in the current inventory."
     }
     else {
@@ -1036,9 +1046,12 @@ try {
     $BaselineComparison = Compare-BaselineRecords -BaselineRecords $BaselineRecords -CurrentRecords $CurrentBaselineRecords
     $ReportedBaselineComparison = $BaselineComparison
 
-    $AllCurrentDevicesAutomaticallyAcceptable = @(
-        $CurrentDevices | Where-Object { $_.Classification -notin @("Approved", "Ignored") }
-    ).Count -eq 0
+    $AllCurrentDevicesAutomaticallyAcceptable = (
+        -not $NoCurrentDevices -and
+        @(
+            $CurrentDevices | Where-Object { $_.Classification -notin @("Approved", "Ignored") }
+        ).Count -eq 0
+    )
 
     $BaselineActionSummary = "No baseline change was made."
     $Status = $InventoryStatus
@@ -1050,6 +1063,11 @@ try {
         if ($ProhibitedCount -gt 0) {
             $Status = "Prohibited Device"
             $BaselineActionSummary = "Manual baseline approval was rejected because the current state contains a prohibited device."
+            Write-DeviceDetectiveLog -Level "WARNING" -Message $BaselineActionSummary
+        }
+        elseif ($NoCurrentDevices) {
+            $Status = "Review Required"
+            $BaselineActionSummary = "Manual baseline approval was rejected because no monitored device models were detected."
             Write-DeviceDetectiveLog -Level "WARNING" -Message $BaselineActionSummary
         }
         else {
@@ -1065,7 +1083,12 @@ try {
         }
     }
     elseif (-not $BaselineExists) {
-        if ($AllCurrentDevicesAutomaticallyAcceptable) {
+        if ($NoCurrentDevices) {
+            $Status = "Review Required"
+            $BaselineActionSummary = "No baseline was created because no monitored device models were detected."
+            Write-DeviceDetectiveLog -Level "WARNING" -Message $BaselineActionSummary
+        }
+        elseif ($AllCurrentDevicesAutomaticallyAcceptable) {
             $NewBaselineValue = ConvertTo-BaselineValue -Records $CurrentBaselineRecords
             Set-DeviceDetectiveProperty -Name $CustomFields.Baseline -Value $NewBaselineValue -Type "MultiLine"
             $BaselineRecords = $CurrentBaselineRecords
@@ -1079,6 +1102,11 @@ try {
         else {
             $BaselineActionSummary = "No baseline exists. IT review is required before the current state can be accepted."
         }
+    }
+    elseif ($NoCurrentDevices) {
+        $Status = "Review Required"
+        $BaselineActionSummary = "The accepted baseline was retained because no monitored device models were detected."
+        Write-DeviceDetectiveLog -Level "WARNING" -Message $BaselineActionSummary
     }
     elseif ($BaselineComparison.Matches) {
         # A manually accepted Known or Unknown model remains normal while the
