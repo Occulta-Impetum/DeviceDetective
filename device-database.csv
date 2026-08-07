@@ -6430,6 +6430,7 @@
 046D,C539,"Logitech, Inc.",Lightspeed Receiver,Approved,
 046D,C53A,"Logitech, Inc.",PowerPlay Wireless Charging System,Approved,
 046D,C53D,"Logitech, Inc.",G631 Keyboard,Approved,
+046D,C53F,"Logitech, Inc.",G305 Mouse,Approved,
 046D,C542,"Logitech, Inc.",M185 compact wireless mouse,Approved,
 046D,C548,"Logitech, Inc.",Logi Bolt Receiver,Approved,
 046D,C603,"Logitech, Inc.",3Dconnexion Spacemouse Plus XT,Approved,
@@ -21741,7 +21742,7 @@
 1C4F,0003,SiGma Micro,HID controller,Known,
 1C4F,0026,SiGma Micro,Keyboard,Known,
 1C4F,0032,SiGma Micro,Optical Mouse with Scroll Wheel,Known,
-1C4F,0034,SiGma Micro,XM102K Optical Wheel Mouse,Known,
+1C4F,0034,SiGma Micro,XM102K Optical Wheel Mouse,Approved,Left in place
 1C4F,0063,SiGma Micro,Touchpad (integrated in detachable keyboard of Chuwi SurBook),Known,
 1C4F,0065,SiGma Micro,Optical Wheel Mouse [Rapoo N1130],Known,
 1C4F,3000,SiGma Micro,Micro USB Web Camera,Known,
