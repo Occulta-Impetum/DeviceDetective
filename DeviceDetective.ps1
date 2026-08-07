@@ -11,6 +11,7 @@
       - Extracts and normalizes USB and Bluetooth VID/PID values when available
       - Consolidates duplicate interfaces representing the same physical device model
       - Excludes generic Bluetooth HID child interfaces that cannot identify a model
+      - Excludes built-in Microsoft Surface HID/touch interfaces from monitored inventory
       - Resolves friendly names and classifications from the local database
       - Refreshes the database only for valid VID/PID models missing from the cache
       - Writes the current inventory and summary to NinjaOne custom fields
@@ -328,6 +329,25 @@ function Get-CurrentDeviceModels {
 
     $UniqueDevices = @{}
     $IgnoredGenericBluetoothInterfaces = 0
+    $IgnoredBuiltInSurfaceInterfaces = 0
+
+    # Surface systems expose many built-in touch, pen, button, keyboard, and
+    # Virtual HID Framework interfaces through HIDClass. These are internal
+    # platform devices rather than removable peripherals that Device Detective
+    # is intended to monitor. Limit the filter to confirmed Microsoft Surface
+    # hardware so similarly named interfaces on other computers remain visible.
+    $IsMicrosoftSurface = $false
+
+    try {
+        $ComputerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+        $IsMicrosoftSurface = (
+            [string]$ComputerSystem.Manufacturer -match '(?i)^Microsoft' -and
+            [string]$ComputerSystem.Model -match '(?i)^Surface'
+        )
+    }
+    catch {
+        Write-DeviceDetectiveLog "Unable to determine whether this computer is a Microsoft Surface. Surface-specific filtering will not be applied: $($_.Exception.Message)" -Level "WARNING"
+    }
 
     foreach ($Device in $AllDevices) {
         $InstanceID = [string]$Device.InstanceId
@@ -380,6 +400,30 @@ function Get-CurrentDeviceModels {
             $ProductID -match '^[0-9A-F]{4}$'
         )
 
+        # Microsoft Surface systems expose internal HID interfaces for touch,
+        # pen, buttons, the built-in keyboard/touchpad, and Virtual HID Framework.
+        # They frequently use nonstandard identifiers instead of USB VID/PID.
+        # Ignore only these known internal patterns and only on confirmed Surface
+        # hardware. Valid VID/PID devices are never removed by this filter.
+        $FriendlyName = [string]$Device.FriendlyName
+        $IsBuiltInSurfaceInterface = (
+            $IsMicrosoftSurface -and
+            -not $HasValidVidPid -and
+            (
+                $FriendlyName -match '(?i)^Surface\b' -or
+                $FriendlyName -match '(?i)^Intel\(R\) Precise Touch and Stylus\b' -or
+                $DeviceInformation -match '(?i)^CONVERTEDDEVICE(?:&COL[0-9A-F]+)?$' -or
+                $DeviceInformation -match '(?i)^HID_DEVICE_SYSTEM_VHF(?:&COL[0-9A-F]+)?$' -or
+                $DeviceInformation -match '(?i)^TARGET_(?:SAM|KIP)&CATEGORY_HID(?:&COL[0-9A-F]+)?$' -or
+                $DeviceInformation -match '(?i)^MSHW0005$'
+            )
+        )
+
+        if ($IsBuiltInSurfaceInterface) {
+            $IgnoredBuiltInSurfaceInterfaces++
+            continue
+        }
+
         # Windows exposes generic BLE GATT child interfaces in addition to the
         # actual keyboard or mouse model. These records do not safely identify
         # a model and should not create a duplicate Unknown device.
@@ -431,6 +475,10 @@ function Get-CurrentDeviceModels {
 
     if ($IgnoredGenericBluetoothInterfaces -gt 0) {
         Write-DeviceDetectiveLog "Ignored $IgnoredGenericBluetoothInterfaces generic Bluetooth HID child interface(s)."
+    }
+
+    if ($IgnoredBuiltInSurfaceInterfaces -gt 0) {
+        Write-DeviceDetectiveLog "Ignored $IgnoredBuiltInSurfaceInterfaces built-in Microsoft Surface HID interface(s)."
     }
 
     return $Results
