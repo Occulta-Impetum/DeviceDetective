@@ -1129,7 +1129,12 @@ try {
         $BaselineActionSummary = "The accepted baseline was retained because the changed state contains a Known, Unknown, or Prohibited device."
     }
 
-    $BaselineChangeSummary = Format-BaselineChanges -Comparison $ReportedBaselineComparison
+    $BaselineChangeSummary = if (-not $BaselineExists) {
+        "No accepted baseline exists for comparison."
+    }
+    else {
+        Format-BaselineChanges -Comparison $ReportedBaselineComparison
+    }
 
     $ReviewContextSummary = if (
         $ReviewDevices.Count -gt 0 -and
