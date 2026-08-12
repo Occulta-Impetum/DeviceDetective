@@ -330,6 +330,7 @@ function Get-CurrentDeviceModels {
     $UniqueDevices = @{}
     $IgnoredGenericBluetoothInterfaces = 0
     $IgnoredBuiltInSurfaceInterfaces = 0
+    $IgnoredConvertedDeviceInterfaces = 0
 
     # Surface systems expose many built-in touch, pen, button, keyboard, and
     # Virtual HID Framework interfaces through HIDClass. These are internal
@@ -424,6 +425,21 @@ function Get-CurrentDeviceModels {
             continue
         }
 
+        # Windows can expose internal ACPI/firmware HID collections using the
+        # nonstandard CONVERTEDDEVICE identifier. These interfaces represent
+        # built-in system controls rather than a removable USB/Bluetooth model.
+        # Ignore only the base CONVERTEDDEVICE record and its numbered
+        # collection children, and never suppress a device with a valid VID/PID.
+        $IsConvertedDeviceInterface = (
+            -not $HasValidVidPid -and
+            $DeviceInformation -match '(?i)^CONVERTEDDEVICE(?:&COL[0-9A-F]+)?$'
+        )
+
+        if ($IsConvertedDeviceInterface) {
+            $IgnoredConvertedDeviceInterfaces++
+            continue
+        }
+
         # Windows exposes generic BLE GATT child interfaces in addition to the
         # actual keyboard or mouse model. These records do not safely identify
         # a model and should not create a duplicate Unknown device.
@@ -479,6 +495,10 @@ function Get-CurrentDeviceModels {
 
     if ($IgnoredBuiltInSurfaceInterfaces -gt 0) {
         Write-DeviceDetectiveLog "Ignored $IgnoredBuiltInSurfaceInterfaces built-in Microsoft Surface HID interface(s)."
+    }
+
+    if ($IgnoredConvertedDeviceInterfaces -gt 0) {
+        Write-DeviceDetectiveLog "Ignored $IgnoredConvertedDeviceInterfaces internal CONVERTEDDEVICE HID interface(s)."
     }
 
     return $Results
