@@ -375,6 +375,18 @@ function Get-CurrentDeviceModels {
             $ProductID = $Matches[2].ToUpperInvariant()
             $IdentifierType = "Standard VID/PID"
         }
+        # Bluetooth LE GATT HID records can encode a two-character vendor-ID
+        # source immediately before the actual four-character vendor ID.
+        # Examples observed in Windows:
+        # {GUID}_DEV_VID&02046D_PID&B02B -> VID 046D / PID B02B
+        # {GUID}_DEV_VID&02046D_PID&B383 -> VID 046D / PID B383
+        # Capture the final four characters as the vendor ID and discard the
+        # two-character source value.
+        elseif ($DeviceInformation -match '(?i)_DEV_VID&[0-9A-F]{2}([0-9A-F]{4})_PID&([0-9A-F]{4})') {
+            $VendorID = $Matches[1].ToUpperInvariant()
+            $ProductID = $Matches[2].ToUpperInvariant()
+            $IdentifierType = "Bluetooth LE VID/PID"
+        }
         # Bluetooth Classic HID can encode the vendor source plus the actual
         # four-character vendor ID, for example:
         # {GUID}_VID&00023434_PID&02A0 -> VID 3434 / PID 02A0.
