@@ -314,6 +314,84 @@ function Import-DeviceDatabase {
     return $Rows
 }
 
+
+function Invoke-DeviceDetectiveWinRTAwait {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        $Operation,
+
+        [Parameter(Mandatory)]
+        [Type]$ResultType
+    )
+
+    $AsTaskGeneric = (
+        [System.WindowsRuntimeSystemExtensions].GetMethods() |
+        Where-Object {
+            $_.Name -eq 'AsTask' -and
+            $_.IsGenericMethodDefinition -and
+            $_.GetParameters().Count -eq 1 -and
+            $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
+        }
+    )[0]
+
+    if ($null -eq $AsTaskGeneric) {
+        throw "Unable to locate the WinRT AsTask helper method."
+    }
+
+    $AsTask = $AsTaskGeneric.MakeGenericMethod($ResultType)
+    $Task = $AsTask.Invoke($null, @($Operation))
+    $Task.Wait()
+
+    return $Task.Result
+}
+
+function Get-ConnectedBluetoothLEAddresses {
+    [CmdletBinding()]
+    param()
+
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime -ErrorAction Stop
+
+    $null = [Windows.Devices.Bluetooth.BluetoothLEDevice,Windows.Devices.Bluetooth,ContentType=WindowsRuntime]
+    $null = [Windows.Devices.Bluetooth.BluetoothConnectionStatus,Windows.Devices.Bluetooth,ContentType=WindowsRuntime]
+    $null = [Windows.Devices.Enumeration.DeviceInformation,Windows.Devices.Enumeration,ContentType=WindowsRuntime]
+    $null = [Windows.Devices.Enumeration.DeviceInformationCollection,Windows.Devices.Enumeration,ContentType=WindowsRuntime]
+
+    $Selector = [Windows.Devices.Bluetooth.BluetoothLEDevice]::GetDeviceSelectorFromConnectionStatus(
+        [Windows.Devices.Bluetooth.BluetoothConnectionStatus]::Connected
+    )
+
+    $DeviceInformationCollection = Invoke-DeviceDetectiveWinRTAwait `
+        -Operation ([Windows.Devices.Enumeration.DeviceInformation]::FindAllAsync($Selector)) `
+        -ResultType ([Windows.Devices.Enumeration.DeviceInformationCollection])
+
+    $ConnectedAddresses = @()
+
+    foreach ($DeviceInformation in $DeviceInformationCollection) {
+        $BluetoothDevice = $null
+
+        try {
+            $BluetoothDevice = Invoke-DeviceDetectiveWinRTAwait `
+                -Operation ([Windows.Devices.Bluetooth.BluetoothLEDevice]::FromIdAsync($DeviceInformation.Id)) `
+                -ResultType ([Windows.Devices.Bluetooth.BluetoothLEDevice])
+
+            if (
+                $null -ne $BluetoothDevice -and
+                $BluetoothDevice.ConnectionStatus -eq [Windows.Devices.Bluetooth.BluetoothConnectionStatus]::Connected
+            ) {
+                $ConnectedAddresses += ('{0:X12}' -f $BluetoothDevice.BluetoothAddress)
+            }
+        }
+        finally {
+            if ($null -ne $BluetoothDevice) {
+                $BluetoothDevice.Dispose()
+            }
+        }
+    }
+
+    return @($ConnectedAddresses | Sort-Object -Unique)
+}
+
 function Get-CurrentDeviceModels {
     [CmdletBinding()]
     param()
@@ -331,6 +409,36 @@ function Get-CurrentDeviceModels {
     $IgnoredGenericBluetoothInterfaces = 0
     $IgnoredBuiltInSurfaceInterfaces = 0
     $IgnoredConvertedDeviceInterfaces = 0
+    $IgnoredDisconnectedBluetoothInterfaces = 0
+    $BluetoothInterfacesWithoutAddress = 0
+
+    $ConnectedBluetoothLEAddressSet = @{}
+    $BluetoothConnectionFilterAvailable = $false
+
+    $HasBluetoothLEHidRecords = @(
+        $AllDevices |
+        Where-Object {
+            [string]$_.InstanceId -match '(?i)^BTHLEDEVICE\\'
+        }
+    ).Count -gt 0
+
+    if ($HasBluetoothLEHidRecords) {
+        try {
+            $ConnectedBluetoothLEAddresses = @(Get-ConnectedBluetoothLEAddresses)
+
+            foreach ($ConnectedBluetoothLEAddress in $ConnectedBluetoothLEAddresses) {
+                if (-not [string]::IsNullOrWhiteSpace($ConnectedBluetoothLEAddress)) {
+                    $ConnectedBluetoothLEAddressSet[$ConnectedBluetoothLEAddress.ToUpperInvariant()] = $true
+                }
+            }
+
+            $BluetoothConnectionFilterAvailable = $true
+            Write-DeviceDetectiveLog "Detected $($ConnectedBluetoothLEAddressSet.Count) currently connected Bluetooth LE device(s)."
+        }
+        catch {
+            Write-DeviceDetectiveLog "Unable to determine current Bluetooth LE connection state. Bluetooth LE devices will be retained rather than risk hiding a connected device: $($_.Exception.Message)" -Level "WARNING"
+        }
+    }
 
     # Surface systems expose many built-in touch, pen, button, keyboard, and
     # Virtual HID Framework interfaces through HIDClass. These are internal
@@ -368,6 +476,7 @@ function Get-CurrentDeviceModels {
         $VendorID = $null
         $ProductID = $null
         $IdentifierType = "Nonstandard"
+        $BluetoothAddress = $null
 
         # Standard USB/HID format, for example VID_03F0&PID_584A.
         if ($InstanceID -match '(?i)VID_([0-9A-F]{4})&PID_([0-9A-F]{4})') {
@@ -386,6 +495,14 @@ function Get-CurrentDeviceModels {
             $VendorID = $Matches[1].ToUpperInvariant()
             $ProductID = $Matches[2].ToUpperInvariant()
             $IdentifierType = "Bluetooth LE VID/PID"
+
+            # The BTHLEDEVICE instance ID also contains the 12-character
+            # Bluetooth address immediately before the final instance path.
+            # Example:
+            # ..._DEV_VID&02046D_PID&B02B_REV&0014_D2E01ED79E81\...
+            if ($InstanceID -match '(?i)_([0-9A-F]{12})\\') {
+                $BluetoothAddress = $Matches[1].ToUpperInvariant()
+            }
         }
         # Bluetooth Classic HID can encode the vendor source plus the actual
         # four-character vendor ID, for example:
@@ -412,6 +529,24 @@ function Get-CurrentDeviceModels {
             $VendorID -match '^[0-9A-F]{4}$' -and
             $ProductID -match '^[0-9A-F]{4}$'
         )
+
+        # Get-PnpDevice can continue reporting HID/GATT children for Bluetooth LE
+        # devices that are merely remembered by Windows and are no longer
+        # connected. When current connection state was successfully queried,
+        # retain a Bluetooth LE HID model only if its embedded Bluetooth address
+        # is in the currently connected address set.
+        if ($IdentifierType -eq "Bluetooth LE VID/PID" -and $HasValidVidPid) {
+            if ([string]::IsNullOrWhiteSpace($BluetoothAddress)) {
+                $BluetoothInterfacesWithoutAddress++
+            }
+            elseif (
+                $BluetoothConnectionFilterAvailable -and
+                -not $ConnectedBluetoothLEAddressSet.ContainsKey($BluetoothAddress)
+            ) {
+                $IgnoredDisconnectedBluetoothInterfaces++
+                continue
+            }
+        }
 
         # Microsoft Surface systems expose internal HID interfaces for touch,
         # pen, buttons, the built-in keyboard/touchpad, and Virtual HID Framework.
@@ -511,6 +646,14 @@ function Get-CurrentDeviceModels {
 
     if ($IgnoredConvertedDeviceInterfaces -gt 0) {
         Write-DeviceDetectiveLog "Ignored $IgnoredConvertedDeviceInterfaces internal CONVERTEDDEVICE HID interface(s)."
+    }
+
+    if ($IgnoredDisconnectedBluetoothInterfaces -gt 0) {
+        Write-DeviceDetectiveLog "Ignored $IgnoredDisconnectedBluetoothInterfaces Bluetooth LE HID interface(s) belonging to currently disconnected devices."
+    }
+
+    if ($BluetoothInterfacesWithoutAddress -gt 0) {
+        Write-DeviceDetectiveLog "Retained $BluetoothInterfacesWithoutAddress Bluetooth LE HID interface(s) because a Bluetooth address could not be extracted." -Level "WARNING"
     }
 
     return $Results
