@@ -500,8 +500,24 @@ function Get-CurrentDeviceModels {
             # Bluetooth address immediately before the final instance path.
             # Example:
             # ..._DEV_VID&02046D_PID&B02B_REV&0014_D2E01ED79E81\...
-            if ($InstanceID -match '(?i)_([0-9A-F]{12})\\') {
-                $BluetoothAddress = $Matches[1].ToUpperInvariant()
+            # HID child collections may append &COLxx after the Bluetooth
+            # address before the instance-path separator, for example:
+            # ..._C8678A54D1D6&COL01\...
+            # Try both the full InstanceId and the normalized device data so
+            # either Windows representation can supply the address.
+            $BluetoothAddressSource = @(
+                [string]$InstanceID,
+                [string]$DeviceInformation
+            )
+
+            foreach ($AddressSource in $BluetoothAddressSource) {
+                if (
+                    -not [string]::IsNullOrWhiteSpace($AddressSource) -and
+                    $AddressSource -match '(?i)_([0-9A-F]{12})(?:&COL[0-9A-F]+)?(?:\\|$)'
+                ) {
+                    $BluetoothAddress = $Matches[1].ToUpperInvariant()
+                    break
+                }
             }
         }
         # Bluetooth Classic HID can encode the vendor source plus the actual
