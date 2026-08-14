@@ -676,42 +676,56 @@ function Get-CurrentDeviceModels {
             continue
         }
 
-        # Virtual HID Framework (VHF) can expose a nonstandard child record such
-        # as HID_DEVICE_SYSTEM_VHF for a real physical peripheral. Do not ignore
-        # VHF globally. Ignore it only when Windows reports a parent with a valid
-        # VID/PID and that same VID/PID model is independently present in the
-        # monitored PnP inventory. This was observed with the Logitech G213:
-        # VHF\HID_DEVICE_SYSTEM_VHF -> parent USB\VID_046D&PID_C336 -> G213.
+        # Virtual HID Framework (VHF) can expose one or more virtual HID layers
+        # for a real physical peripheral. Do not ignore VHF globally. For a
+        # nonstandard HID_DEVICE_SYSTEM_VHF record, walk a short parent chain
+        # and ignore it only if an ancestor exposes a valid VID/PID that is also
+        # independently represented in the monitored PnP inventory.
+        #
+        # Example observed on CAT216:
+        # HID\HID_DEVICE_SYSTEM_VHF
+        #   -> VHF\HID_DEVICE_SYSTEM_VHF
+        #      -> USB\VID_046D&PID_C336  (Logitech G213)
         $IsValidatedVhfChild = $false
 
         if (
             -not $HasValidVidPid -and
             $DeviceInformation -match '(?i)^HID_DEVICE_SYSTEM_VHF(?:&COL[0-9A-F]+)?$'
         ) {
-            try {
-                $ParentProperty = Get-PnpDeviceProperty `
-                    -InstanceId $InstanceID `
-                    -KeyName 'DEVPKEY_Device_Parent' `
-                    -ErrorAction Stop
+            $AncestorInstanceId = $InstanceID
 
-                $ParentInstanceId = [string]$ParentProperty.Data
+            for ($AncestorDepth = 0; $AncestorDepth -lt 5; $AncestorDepth++) {
+                try {
+                    $ParentProperty = Get-PnpDeviceProperty `
+                        -InstanceId $AncestorInstanceId `
+                        -KeyName 'DEVPKEY_Device_Parent' `
+                        -ErrorAction Stop
 
-                if (
-                    -not [string]::IsNullOrWhiteSpace($ParentInstanceId) -and
-                    $ParentInstanceId -match '(?i)VID_([0-9A-F]{4})&PID_([0-9A-F]{4})'
-                ) {
-                    $ParentVendorId = $Matches[1].ToUpperInvariant()
-                    $ParentProductId = $Matches[2].ToUpperInvariant()
-                    $ParentVidPidKey = "$ParentVendorId|$ParentProductId"
+                    $ParentInstanceId = [string]$ParentProperty.Data
 
-                    if ($DetectedVidPidKeys.ContainsKey($ParentVidPidKey)) {
-                        $IsValidatedVhfChild = $true
+                    if ([string]::IsNullOrWhiteSpace($ParentInstanceId)) {
+                        break
                     }
+
+                    if ($ParentInstanceId -match '(?i)VID_([0-9A-F]{4})&PID_([0-9A-F]{4})') {
+                        $ParentVendorId = $Matches[1].ToUpperInvariant()
+                        $ParentProductId = $Matches[2].ToUpperInvariant()
+                        $ParentVidPidKey = "$ParentVendorId|$ParentProductId"
+
+                        if ($DetectedVidPidKeys.ContainsKey($ParentVidPidKey)) {
+                            $IsValidatedVhfChild = $true
+                            break
+                        }
+                    }
+
+                    $AncestorInstanceId = $ParentInstanceId
                 }
-            }
-            catch {
-                # If the parent cannot be resolved, retain the VHF record for
-                # review rather than risk hiding an unexplained virtual HID.
+                catch {
+                    # If the parent chain cannot be resolved, retain the VHF
+                    # record for review rather than risk hiding an unexplained
+                    # virtual HID device.
+                    break
+                }
             }
         }
 
@@ -812,7 +826,7 @@ function Get-CurrentDeviceModels {
     }
 
     if ($IgnoredVhfChildInterfaces -gt 0) {
-        Write-DeviceDetectiveLog "Ignored $IgnoredVhfChildInterfaces VHF HID child interface(s) whose parent VID/PID model is already represented in the monitored inventory."
+        Write-DeviceDetectiveLog "Ignored $IgnoredVhfChildInterfaces VHF HID child interface(s) whose parent/ancestor VID/PID model is already represented in the monitored inventory."
     }
 
     if ($BluetoothMetadataMatches -gt 0) {
