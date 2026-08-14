@@ -372,9 +372,10 @@ function Get-BluetoothLEMetadata {
             $RequestedProperties
         )) `
         -ResultType ([Windows.Devices.Enumeration.DeviceInformationCollection])
-
-    # The Bluetooth device interface exposes DEVPKEY_Bluetooth_LastConnectedTime.
     # Collect the top-level BTHLE devices once, then correlate by Bluetooth address.
+    # Property {104EA319-6EE2-4701-BD47-8DDBF425BBE5} 7 was validated on BLE HID
+    # devices to update when an asleep/disconnected device wakes and reconnects.
+    # It is supplemental telemetry only and does not affect inventory/baseline state.
     $BluetoothPnpDevices = @()
 
     try {
@@ -386,7 +387,7 @@ function Get-BluetoothLEMetadata {
         )
     }
     catch {
-        Write-DeviceDetectiveLog "Unable to enumerate top-level Bluetooth LE Plug and Play devices for last-connected timestamps: $($_.Exception.Message)" -Level "WARNING"
+        Write-DeviceDetectiveLog "Unable to enumerate top-level Bluetooth LE Plug and Play devices for wake/connect timestamps: $($_.Exception.Message)" -Level "WARNING"
     }
 
     $Results = @{}
@@ -416,7 +417,7 @@ function Get-BluetoothLEMetadata {
             continue
         }
 
-        $LastConnected = $null
+        $LastWakeConnect = $null
         $MatchingPnpDevice = @(
             $BluetoothPnpDevices |
             Where-Object {
@@ -427,17 +428,17 @@ function Get-BluetoothLEMetadata {
 
         if ($MatchingPnpDevice.Count -gt 0) {
             try {
-                $LastConnectedProperty = Get-PnpDeviceProperty `
+                $LastWakeConnectProperty = Get-PnpDeviceProperty `
                     -InstanceId $MatchingPnpDevice[0].InstanceId `
-                    -KeyName 'DEVPKEY_Bluetooth_LastConnectedTime' `
+                    -KeyName '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 7' `
                     -ErrorAction Stop
 
-                if ($null -ne $LastConnectedProperty -and $null -ne $LastConnectedProperty.Data) {
-                    $LastConnected = $LastConnectedProperty.Data
+                if ($null -ne $LastWakeConnectProperty -and $null -ne $LastWakeConnectProperty.Data) {
+                    $LastWakeConnect = $LastWakeConnectProperty.Data
                 }
             }
             catch {
-                # Last-connected time is supplemental telemetry. Do not fail
+                # Wake/connect time is supplemental telemetry. Do not fail
                 # inventory collection if a particular device lacks the property.
             }
         }
@@ -457,7 +458,7 @@ function Get-BluetoothLEMetadata {
             Address       = $NormalizedAddress
             IsConnected   = $IsConnected
             IsPaired      = $IsPaired
-            LastConnected = $LastConnected
+            LastWakeConnect = $LastWakeConnect
             DeviceId      = [string]$DeviceInformation.Id
         }
     }
@@ -699,7 +700,7 @@ function Get-CurrentDeviceModels {
                 $ExistingDevice.BluetoothAddress = [string]$BluetoothMetadataRecord.Address
                 $ExistingDevice.BluetoothConnected = $BluetoothMetadataRecord.IsConnected
                 $ExistingDevice.BluetoothPaired = $BluetoothMetadataRecord.IsPaired
-                $ExistingDevice.BluetoothLastConnected = $BluetoothMetadataRecord.LastConnected
+                $ExistingDevice.BluetoothLastWakeConnect = $BluetoothMetadataRecord.LastWakeConnect
             }
 
             continue
@@ -723,7 +724,7 @@ function Get-CurrentDeviceModels {
             BluetoothAddress       = if ($null -ne $BluetoothMetadataRecord) { [string]$BluetoothMetadataRecord.Address } else { $BluetoothAddress }
             BluetoothConnected     = if ($null -ne $BluetoothMetadataRecord) { $BluetoothMetadataRecord.IsConnected } else { $null }
             BluetoothPaired        = if ($null -ne $BluetoothMetadataRecord) { $BluetoothMetadataRecord.IsPaired } else { $null }
-            BluetoothLastConnected = if ($null -ne $BluetoothMetadataRecord) { $BluetoothMetadataRecord.LastConnected } else { $null }
+            BluetoothLastWakeConnect = if ($null -ne $BluetoothMetadataRecord) { $BluetoothMetadataRecord.LastWakeConnect } else { $null }
         }
     }
 
@@ -884,19 +885,19 @@ function Format-CurrentDevices {
                 [string][bool]$Device.BluetoothPaired
             }
 
-            $BluetoothLastConnectedText = if ($null -eq $Device.BluetoothLastConnected) {
+            $BluetoothLastWakeConnectText = if ($null -eq $Device.BluetoothLastWakeConnect) {
                 "Not available"
             }
-            elseif ($Device.BluetoothLastConnected -is [datetime]) {
-                ([datetime]$Device.BluetoothLastConnected).ToString("MM/dd/yyyy hh:mm tt")
+            elseif ($Device.BluetoothLastWakeConnect -is [datetime]) {
+                ([datetime]$Device.BluetoothLastWakeConnect).ToString("MM/dd/yyyy hh:mm tt")
             }
             else {
-                [string]$Device.BluetoothLastConnected
+                [string]$Device.BluetoothLastWakeConnect
             }
 
             $Lines += "Bluetooth connected now: $BluetoothConnectedText"
             $Lines += "Bluetooth paired: $BluetoothPairedText"
-            $Lines += "Bluetooth last connected: $BluetoothLastConnectedText"
+            $Lines += "Bluetooth last wake/connect: $BluetoothLastWakeConnectText"
         }
 
         $Lines -join [Environment]::NewLine
