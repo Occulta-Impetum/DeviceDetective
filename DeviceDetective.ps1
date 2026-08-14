@@ -1427,9 +1427,15 @@ try {
             Write-DeviceDetectiveLog -Level "WARNING" -Message $BaselineActionSummary
         }
         elseif ($NoCurrentDevices) {
-            $Status = "Review Required"
-            $BaselineActionSummary = "Manual baseline approval was rejected because no monitored device models were detected."
-            Write-DeviceDetectiveLog -Level "WARNING" -Message $BaselineActionSummary
+            $NewBaselineValue = ConvertTo-BaselineValue -Records @()
+            Set-DeviceDetectiveProperty -Name $CustomFields.Baseline -Value $NewBaselineValue -Type "MultiLine"
+            $BaselineRecords = @()
+            $BaselineExists = $true
+            $BaselineComparison = New-MatchingBaselineComparison
+            $ReportedBaselineComparison = $BaselineComparison
+            $Status = "Normal"
+            $BaselineActionSummary = "An empty device inventory was accepted as the baseline through the NinjaOne approval action."
+            Write-DeviceDetectiveLog $BaselineActionSummary
         }
         else {
             $NewBaselineValue = ConvertTo-BaselineValue -Records $CurrentBaselineRecords
@@ -1465,9 +1471,18 @@ try {
         }
     }
     elseif ($NoCurrentDevices) {
-        $Status = "Review Required"
-        $BaselineActionSummary = "The accepted baseline was retained because no monitored device models were detected."
-        Write-DeviceDetectiveLog -Level "WARNING" -Message $BaselineActionSummary
+        if ($BaselineComparison.Matches) {
+            # An explicitly accepted empty baseline is a valid normal state for
+            # headless systems. Zero devices are never auto-baselined, but once
+            # manually approved, future successful zero-device scans should match.
+            $Status = "Normal"
+            $BaselineActionSummary = "No baseline change was made. The accepted baseline intentionally contains no monitored device models."
+        }
+        else {
+            $Status = "Review Required"
+            $BaselineActionSummary = "The accepted baseline was retained because no monitored device models were detected."
+            Write-DeviceDetectiveLog -Level "WARNING" -Message $BaselineActionSummary
+        }
     }
     elseif ($BaselineComparison.Matches) {
         # A manually accepted Known or Unknown model remains normal while the
