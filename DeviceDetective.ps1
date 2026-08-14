@@ -483,6 +483,7 @@ function Get-CurrentDeviceModels {
     $IgnoredGenericBluetoothInterfaces = 0
     $IgnoredBuiltInSurfaceInterfaces = 0
     $IgnoredConvertedDeviceInterfaces = 0
+    $IgnoredVhfChildInterfaces = 0
     $BluetoothInterfacesWithoutAddress = 0
     $BluetoothMetadataMatches = 0
 
@@ -503,6 +504,29 @@ function Get-CurrentDeviceModels {
         catch {
             Write-DeviceDetectiveLog "Unable to retrieve supplemental Bluetooth LE metadata. Bluetooth inventory will continue without it: $($_.Exception.Message)" -Level "WARNING"
             $BluetoothLEMetadata = @{}
+        }
+    }
+
+    # Build a set of physical/model VID/PID identities already represented in
+    # the monitored PnP inventory. This is used only to validate VHF children:
+    # a VHF record is ignored only when its parent resolves to a VID/PID model
+    # that is also independently present in the Mouse/Keyboard/HIDClass scan.
+    $DetectedVidPidKeys = @{}
+
+    foreach ($DetectedDevice in $AllDevices) {
+        $DetectedInstanceId = [string]$DetectedDevice.InstanceId
+
+        if ($DetectedInstanceId -match '(?i)VID_([0-9A-F]{4})&PID_([0-9A-F]{4})') {
+            $DetectedKey = "$($Matches[1].ToUpperInvariant())|$($Matches[2].ToUpperInvariant())"
+            $DetectedVidPidKeys[$DetectedKey] = $true
+        }
+        elseif ($DetectedInstanceId -match '(?i)_DEV_VID&[0-9A-F]{2}([0-9A-F]{4})_PID&([0-9A-F]{4})') {
+            $DetectedKey = "$($Matches[1].ToUpperInvariant())|$($Matches[2].ToUpperInvariant())"
+            $DetectedVidPidKeys[$DetectedKey] = $true
+        }
+        elseif ($DetectedInstanceId -match '(?i)_VID&[0-9A-F]{4}([0-9A-F]{4})_PID&([0-9A-F]{4})') {
+            $DetectedKey = "$($Matches[1].ToUpperInvariant())|$($Matches[2].ToUpperInvariant())"
+            $DetectedVidPidKeys[$DetectedKey] = $true
         }
     }
 
@@ -652,6 +676,50 @@ function Get-CurrentDeviceModels {
             continue
         }
 
+        # Virtual HID Framework (VHF) can expose a nonstandard child record such
+        # as HID_DEVICE_SYSTEM_VHF for a real physical peripheral. Do not ignore
+        # VHF globally. Ignore it only when Windows reports a parent with a valid
+        # VID/PID and that same VID/PID model is independently present in the
+        # monitored PnP inventory. This was observed with the Logitech G213:
+        # VHF\HID_DEVICE_SYSTEM_VHF -> parent USB\VID_046D&PID_C336 -> G213.
+        $IsValidatedVhfChild = $false
+
+        if (
+            -not $HasValidVidPid -and
+            $DeviceInformation -match '(?i)^HID_DEVICE_SYSTEM_VHF(?:&COL[0-9A-F]+)?$'
+        ) {
+            try {
+                $ParentProperty = Get-PnpDeviceProperty `
+                    -InstanceId $InstanceID `
+                    -KeyName 'DEVPKEY_Device_Parent' `
+                    -ErrorAction Stop
+
+                $ParentInstanceId = [string]$ParentProperty.Data
+
+                if (
+                    -not [string]::IsNullOrWhiteSpace($ParentInstanceId) -and
+                    $ParentInstanceId -match '(?i)VID_([0-9A-F]{4})&PID_([0-9A-F]{4})'
+                ) {
+                    $ParentVendorId = $Matches[1].ToUpperInvariant()
+                    $ParentProductId = $Matches[2].ToUpperInvariant()
+                    $ParentVidPidKey = "$ParentVendorId|$ParentProductId"
+
+                    if ($DetectedVidPidKeys.ContainsKey($ParentVidPidKey)) {
+                        $IsValidatedVhfChild = $true
+                    }
+                }
+            }
+            catch {
+                # If the parent cannot be resolved, retain the VHF record for
+                # review rather than risk hiding an unexplained virtual HID.
+            }
+        }
+
+        if ($IsValidatedVhfChild) {
+            $IgnoredVhfChildInterfaces++
+            continue
+        }
+
         # Windows can expose internal ACPI/firmware HID collections using the
         # nonstandard CONVERTEDDEVICE identifier. These interfaces represent
         # built-in system controls rather than a removable USB/Bluetooth model.
@@ -741,6 +809,10 @@ function Get-CurrentDeviceModels {
 
     if ($IgnoredConvertedDeviceInterfaces -gt 0) {
         Write-DeviceDetectiveLog "Ignored $IgnoredConvertedDeviceInterfaces internal CONVERTEDDEVICE HID interface(s)."
+    }
+
+    if ($IgnoredVhfChildInterfaces -gt 0) {
+        Write-DeviceDetectiveLog "Ignored $IgnoredVhfChildInterfaces VHF HID child interface(s) whose parent VID/PID model is already represented in the monitored inventory."
     }
 
     if ($BluetoothMetadataMatches -gt 0) {
