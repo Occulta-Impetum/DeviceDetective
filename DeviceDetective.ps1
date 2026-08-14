@@ -346,50 +346,123 @@ function Invoke-DeviceDetectiveWinRTAwait {
     return $Task.Result
 }
 
-function Get-ConnectedBluetoothLEAddresses {
+function Get-BluetoothLEMetadata {
     [CmdletBinding()]
     param()
 
     Add-Type -AssemblyName System.Runtime.WindowsRuntime -ErrorAction Stop
 
     $null = [Windows.Devices.Bluetooth.BluetoothLEDevice,Windows.Devices.Bluetooth,ContentType=WindowsRuntime]
-    $null = [Windows.Devices.Bluetooth.BluetoothConnectionStatus,Windows.Devices.Bluetooth,ContentType=WindowsRuntime]
     $null = [Windows.Devices.Enumeration.DeviceInformation,Windows.Devices.Enumeration,ContentType=WindowsRuntime]
     $null = [Windows.Devices.Enumeration.DeviceInformationCollection,Windows.Devices.Enumeration,ContentType=WindowsRuntime]
 
-    $Selector = [Windows.Devices.Bluetooth.BluetoothLEDevice]::GetDeviceSelectorFromConnectionStatus(
-        [Windows.Devices.Bluetooth.BluetoothConnectionStatus]::Connected
+    $RequestedProperties = [string[]]@(
+        'System.Devices.Aep.DeviceAddress',
+        'System.Devices.Aep.IsConnected',
+        'System.Devices.Aep.IsPaired'
     )
 
+    # This selector returns Bluetooth LE association endpoints that Windows knows
+    # about, including paired devices that may currently be asleep/disconnected.
+    $Selector = [Windows.Devices.Bluetooth.BluetoothLEDevice]::GetDeviceSelector()
+
     $DeviceInformationCollection = Invoke-DeviceDetectiveWinRTAwait `
-        -Operation ([Windows.Devices.Enumeration.DeviceInformation]::FindAllAsync($Selector)) `
+        -Operation ([Windows.Devices.Enumeration.DeviceInformation]::FindAllAsync(
+            $Selector,
+            $RequestedProperties
+        )) `
         -ResultType ([Windows.Devices.Enumeration.DeviceInformationCollection])
 
-    $ConnectedAddresses = @()
+    # The Bluetooth device interface exposes DEVPKEY_Bluetooth_LastConnectedTime.
+    # Collect the top-level BTHLE devices once, then correlate by Bluetooth address.
+    $BluetoothPnpDevices = @()
+
+    try {
+        $BluetoothPnpDevices = @(
+            Get-PnpDevice -PresentOnly -ErrorAction Stop |
+            Where-Object {
+                [string]$_.InstanceId -match '(?i)^BTHLE\\DEV_[0-9A-F]{12}'
+            }
+        )
+    }
+    catch {
+        Write-DeviceDetectiveLog "Unable to enumerate top-level Bluetooth LE Plug and Play devices for last-connected timestamps: $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    $Results = @{}
 
     foreach ($DeviceInformation in $DeviceInformationCollection) {
-        $BluetoothDevice = $null
+        $PropertyTable = @{}
 
-        try {
-            $BluetoothDevice = Invoke-DeviceDetectiveWinRTAwait `
-                -Operation ([Windows.Devices.Bluetooth.BluetoothLEDevice]::FromIdAsync($DeviceInformation.Id)) `
-                -ResultType ([Windows.Devices.Bluetooth.BluetoothLEDevice])
+        # Windows PowerShell 5.1 projects the WinRT IReadOnlyDictionary as
+        # KeyValuePair objects, so copy the collection into a normal hashtable.
+        foreach ($Property in $DeviceInformation.Properties) {
+            $PropertyTable[[string]$Property.Key] = $Property.Value
+        }
 
-            if (
-                $null -ne $BluetoothDevice -and
-                $BluetoothDevice.ConnectionStatus -eq [Windows.Devices.Bluetooth.BluetoothConnectionStatus]::Connected
-            ) {
-                $ConnectedAddresses += ('{0:X12}' -f $BluetoothDevice.BluetoothAddress)
+        $Address = [string]$PropertyTable['System.Devices.Aep.DeviceAddress']
+
+        # Fall back to the address embedded in DeviceInformation.Id when the
+        # requested AEP property is unavailable.
+        if ([string]::IsNullOrWhiteSpace($Address)) {
+            if ([string]$DeviceInformation.Id -match '(?i)-([0-9A-F]{2}(?::[0-9A-F]{2}){5})$') {
+                $Address = $Matches[1]
             }
         }
-        finally {
-            if ($null -ne $BluetoothDevice) {
-                $BluetoothDevice.Dispose()
+
+        $NormalizedAddress = ($Address -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+
+        if ($NormalizedAddress -notmatch '^[0-9A-F]{12}$') {
+            continue
+        }
+
+        $LastConnected = $null
+        $MatchingPnpDevice = @(
+            $BluetoothPnpDevices |
+            Where-Object {
+                [string]$_.InstanceId -match ("(?i)^BTHLE\\DEV_{0}(?:\\|$)" -f [regex]::Escape($NormalizedAddress))
+            } |
+            Select-Object -First 1
+        )
+
+        if ($MatchingPnpDevice.Count -gt 0) {
+            try {
+                $LastConnectedProperty = Get-PnpDeviceProperty `
+                    -InstanceId $MatchingPnpDevice[0].InstanceId `
+                    -KeyName 'DEVPKEY_Bluetooth_LastConnectedTime' `
+                    -ErrorAction Stop
+
+                if ($null -ne $LastConnectedProperty -and $null -ne $LastConnectedProperty.Data) {
+                    $LastConnected = $LastConnectedProperty.Data
+                }
             }
+            catch {
+                # Last-connected time is supplemental telemetry. Do not fail
+                # inventory collection if a particular device lacks the property.
+            }
+        }
+
+        $IsConnected = $null
+        if ($PropertyTable.ContainsKey('System.Devices.Aep.IsConnected')) {
+            $IsConnected = [bool]$PropertyTable['System.Devices.Aep.IsConnected']
+        }
+
+        $IsPaired = $null
+        if ($PropertyTable.ContainsKey('System.Devices.Aep.IsPaired')) {
+            $IsPaired = [bool]$PropertyTable['System.Devices.Aep.IsPaired']
+        }
+
+        $Results[$NormalizedAddress] = [PSCustomObject]@{
+            Name          = [string]$DeviceInformation.Name
+            Address       = $NormalizedAddress
+            IsConnected   = $IsConnected
+            IsPaired      = $IsPaired
+            LastConnected = $LastConnected
+            DeviceId      = [string]$DeviceInformation.Id
         }
     }
 
-    return @($ConnectedAddresses | Sort-Object -Unique)
+    return $Results
 }
 
 function Get-CurrentDeviceModels {
@@ -409,11 +482,10 @@ function Get-CurrentDeviceModels {
     $IgnoredGenericBluetoothInterfaces = 0
     $IgnoredBuiltInSurfaceInterfaces = 0
     $IgnoredConvertedDeviceInterfaces = 0
-    $IgnoredDisconnectedBluetoothInterfaces = 0
     $BluetoothInterfacesWithoutAddress = 0
+    $BluetoothMetadataMatches = 0
 
-    $ConnectedBluetoothLEAddressSet = @{}
-    $BluetoothConnectionFilterAvailable = $false
+    $BluetoothLEMetadata = @{}
 
     $HasBluetoothLEHidRecords = @(
         $AllDevices |
@@ -424,19 +496,12 @@ function Get-CurrentDeviceModels {
 
     if ($HasBluetoothLEHidRecords) {
         try {
-            $ConnectedBluetoothLEAddresses = @(Get-ConnectedBluetoothLEAddresses)
-
-            foreach ($ConnectedBluetoothLEAddress in $ConnectedBluetoothLEAddresses) {
-                if (-not [string]::IsNullOrWhiteSpace($ConnectedBluetoothLEAddress)) {
-                    $ConnectedBluetoothLEAddressSet[$ConnectedBluetoothLEAddress.ToUpperInvariant()] = $true
-                }
-            }
-
-            $BluetoothConnectionFilterAvailable = $true
-            Write-DeviceDetectiveLog "Detected $($ConnectedBluetoothLEAddressSet.Count) currently connected Bluetooth LE device(s)."
+            $BluetoothLEMetadata = Get-BluetoothLEMetadata
+            Write-DeviceDetectiveLog "Retrieved supplemental metadata for $($BluetoothLEMetadata.Count) Bluetooth LE device(s)."
         }
         catch {
-            Write-DeviceDetectiveLog "Unable to determine current Bluetooth LE connection state. Bluetooth LE devices will be retained rather than risk hiding a connected device: $($_.Exception.Message)" -Level "WARNING"
+            Write-DeviceDetectiveLog "Unable to retrieve supplemental Bluetooth LE metadata. Bluetooth inventory will continue without it: $($_.Exception.Message)" -Level "WARNING"
+            $BluetoothLEMetadata = @{}
         }
     }
 
@@ -546,21 +611,19 @@ function Get-CurrentDeviceModels {
             $ProductID -match '^[0-9A-F]{4}$'
         )
 
-        # Get-PnpDevice can continue reporting HID/GATT children for Bluetooth LE
-        # devices that are merely remembered by Windows and are no longer
-        # connected. When current connection state was successfully queried,
-        # retain a Bluetooth LE HID model only if its embedded Bluetooth address
-        # is in the currently connected address set.
+        # Bluetooth connection state is supplemental telemetry only. Battery-
+        # powered HID devices can sleep while still being legitimate peripherals,
+        # so Connected/Disconnected must never add/remove a device or alter the
+        # baseline. Correlate metadata by Bluetooth address when available.
+        $BluetoothMetadataRecord = $null
+
         if ($IdentifierType -eq "Bluetooth LE VID/PID" -and $HasValidVidPid) {
             if ([string]::IsNullOrWhiteSpace($BluetoothAddress)) {
                 $BluetoothInterfacesWithoutAddress++
             }
-            elseif (
-                $BluetoothConnectionFilterAvailable -and
-                -not $ConnectedBluetoothLEAddressSet.ContainsKey($BluetoothAddress)
-            ) {
-                $IgnoredDisconnectedBluetoothInterfaces++
-                continue
+            elseif ($BluetoothLEMetadata.ContainsKey($BluetoothAddress)) {
+                $BluetoothMetadataRecord = $BluetoothLEMetadata[$BluetoothAddress]
+                $BluetoothMetadataMatches++
             }
         }
 
@@ -629,23 +692,38 @@ function Get-CurrentDeviceModels {
         }
 
         if ($UniqueDevices.ContainsKey($UniqueKey)) {
+            $ExistingDevice = $UniqueDevices[$UniqueKey]
+
+            if ($null -ne $BluetoothMetadataRecord) {
+                $ExistingDevice.BluetoothName = [string]$BluetoothMetadataRecord.Name
+                $ExistingDevice.BluetoothAddress = [string]$BluetoothMetadataRecord.Address
+                $ExistingDevice.BluetoothConnected = $BluetoothMetadataRecord.IsConnected
+                $ExistingDevice.BluetoothPaired = $BluetoothMetadataRecord.IsPaired
+                $ExistingDevice.BluetoothLastConnected = $BluetoothMetadataRecord.LastConnected
+            }
+
             continue
         }
 
         $UniqueDevices[$UniqueKey] = [PSCustomObject]@{
-            VendorID       = $VendorID
-            VendorName     = ""
-            ProductID      = $ProductID
-            ProductName    = ""
-            Classification = "Unknown"
-            Notes           = ""
-            FullDeviceData  = $DeviceInformation
-            FriendlyName    = [string]$Device.FriendlyName
-            PnpClass        = [string]$Device.Class
-            InstanceID      = $InstanceID
-            IdentifierType  = $IdentifierType
-            HasValidVidPid  = $HasValidVidPid
-            LookupMatched   = $false
+            VendorID               = $VendorID
+            VendorName             = ""
+            ProductID              = $ProductID
+            ProductName            = ""
+            Classification         = "Unknown"
+            Notes                  = ""
+            FullDeviceData         = $DeviceInformation
+            FriendlyName           = [string]$Device.FriendlyName
+            PnpClass               = [string]$Device.Class
+            InstanceID             = $InstanceID
+            IdentifierType         = $IdentifierType
+            HasValidVidPid         = $HasValidVidPid
+            LookupMatched          = $false
+            BluetoothName          = if ($null -ne $BluetoothMetadataRecord) { [string]$BluetoothMetadataRecord.Name } else { "" }
+            BluetoothAddress       = if ($null -ne $BluetoothMetadataRecord) { [string]$BluetoothMetadataRecord.Address } else { $BluetoothAddress }
+            BluetoothConnected     = if ($null -ne $BluetoothMetadataRecord) { $BluetoothMetadataRecord.IsConnected } else { $null }
+            BluetoothPaired        = if ($null -ne $BluetoothMetadataRecord) { $BluetoothMetadataRecord.IsPaired } else { $null }
+            BluetoothLastConnected = if ($null -ne $BluetoothMetadataRecord) { $BluetoothMetadataRecord.LastConnected } else { $null }
         }
     }
 
@@ -664,12 +742,12 @@ function Get-CurrentDeviceModels {
         Write-DeviceDetectiveLog "Ignored $IgnoredConvertedDeviceInterfaces internal CONVERTEDDEVICE HID interface(s)."
     }
 
-    if ($IgnoredDisconnectedBluetoothInterfaces -gt 0) {
-        Write-DeviceDetectiveLog "Ignored $IgnoredDisconnectedBluetoothInterfaces Bluetooth LE HID interface(s) belonging to currently disconnected devices."
+    if ($BluetoothMetadataMatches -gt 0) {
+        Write-DeviceDetectiveLog "Matched supplemental Bluetooth metadata to $BluetoothMetadataMatches Bluetooth LE HID interface(s)."
     }
 
     if ($BluetoothInterfacesWithoutAddress -gt 0) {
-        Write-DeviceDetectiveLog "Retained $BluetoothInterfacesWithoutAddress Bluetooth LE HID interface(s) because a Bluetooth address could not be extracted." -Level "WARNING"
+        Write-DeviceDetectiveLog "Unable to extract a Bluetooth address from $BluetoothInterfacesWithoutAddress Bluetooth LE HID interface(s); inventory was retained without supplemental Bluetooth metadata." -Level "WARNING"
     }
 
     return $Results
@@ -770,7 +848,7 @@ function Format-CurrentDevices {
         $VendorName = if ([string]::IsNullOrWhiteSpace([string]$Device.VendorName)) { "Not found" } else { $Device.VendorName }
         $ProductName = if ([string]::IsNullOrWhiteSpace([string]$Device.ProductName)) { "Not found" } else { $Device.ProductName }
 
-        @(
+        $Lines = @(
             "Classification: $($Device.Classification)"
             "VendorID: $VendorID"
             "VendorName: $VendorName"
@@ -778,7 +856,50 @@ function Format-CurrentDevices {
             "ProductName: $ProductName"
             "Identifier type: $($Device.IdentifierType)"
             "Device data: $($Device.FullDeviceData)"
-        ) -join [Environment]::NewLine
+        )
+
+        if (
+            $Device.IdentifierType -eq "Bluetooth LE VID/PID" -or
+            -not [string]::IsNullOrWhiteSpace([string]$Device.BluetoothAddress)
+        ) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$Device.BluetoothName)) {
+                $Lines += "Bluetooth name: $($Device.BluetoothName)"
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace([string]$Device.BluetoothAddress)) {
+                $Lines += "Bluetooth address: $($Device.BluetoothAddress)"
+            }
+
+            $BluetoothConnectedText = if ($null -eq $Device.BluetoothConnected) {
+                "Unknown"
+            }
+            else {
+                [string][bool]$Device.BluetoothConnected
+            }
+
+            $BluetoothPairedText = if ($null -eq $Device.BluetoothPaired) {
+                "Unknown"
+            }
+            else {
+                [string][bool]$Device.BluetoothPaired
+            }
+
+            $BluetoothLastConnectedText = if ($null -eq $Device.BluetoothLastConnected) {
+                "Not available"
+            }
+            elseif ($Device.BluetoothLastConnected -is [datetime]) {
+                ([datetime]$Device.BluetoothLastConnected).ToString("MM/dd/yyyy hh:mm tt")
+            }
+            else {
+                [string]$Device.BluetoothLastConnected
+            }
+
+            $Lines += "Bluetooth connected now: $BluetoothConnectedText"
+            $Lines += "Bluetooth paired: $BluetoothPairedText"
+            $Lines += "Bluetooth last connected: $BluetoothLastConnectedText"
+        }
+
+        $Lines -join [Environment]::NewLine
     }
 
     return ($Blocks -join ([Environment]::NewLine + [Environment]::NewLine))
