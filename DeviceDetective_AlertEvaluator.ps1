@@ -23,17 +23,16 @@
       Current Devices : deviceDetectiveCurrentDevices
       Details         : deviceDetectiveDetails
 
-    IMPORTANT:
-      Replace the LastLoggedInUser placeholder below with the exact NinjaOne
-      scripting/CLI name for the "Last Logged In User" custom field before
-      production use.
+    User context is read locally from Windows only when Device Detective is
+    non-Normal. The script does not depend on NinjaOne's built-in Last Login
+    inventory field.
 #>
 
 [CmdletBinding()]
 param(
     # Optional test overrides. Leave unset in production.
     [string]$TestStatus,
-    [string]$TestLastLoggedInUser,
+    [string]$TestLastActiveUser,
     [string]$TestCurrentDevices,
     [string]$TestDetails
 )
@@ -46,12 +45,9 @@ $ErrorActionPreference = "Stop"
 # ---------------------------------------------------------------------------
 
 $CustomFields = @{
-    Status           = "deviceDetectiveStatus"
-    CurrentDevices   = "deviceDetectiveCurrentDevices"
-    Details          = "deviceDetectiveDetails"
-
-    # TODO: Replace with the exact NinjaOne scripting/CLI field name.
-    LastLoggedInUser = "REPLACE_WITH_LAST_LOGGED_IN_USER_FIELD_NAME"
+    Status         = "deviceDetectiveStatus"
+    CurrentDevices = "deviceDetectiveCurrentDevices"
+    Details        = "deviceDetectiveDetails"
 }
 
 # Keep the ticket output concise even if a multiline custom field grows large.
@@ -166,6 +162,43 @@ function Get-SecondaryFieldValue {
         # Secondary-field failures must not prevent alert evaluation.
         return $Fallback
     }
+}
+
+function Get-LastActiveUser {
+    [CmdletBinding()]
+    param()
+
+    # Prefer the user who is interactively logged on right now. This is queried
+    # only for alert states so the Normal evaluation path remains lightweight.
+    try {
+        $ComputerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+        $CurrentUser = ConvertTo-CleanSingleLine -Value $ComputerSystem.UserName -Fallback ""
+
+        if (-not [string]::IsNullOrWhiteSpace($CurrentUser)) {
+            return $CurrentUser
+        }
+    }
+    catch {
+        # Continue to the fallback below.
+    }
+
+    # If nobody is currently logged on, use Windows' locally recorded last
+    # interactive logon identity. This is intentionally a fallback and is not
+    # intended to duplicate NinjaOne's potentially delayed Last Login field.
+    try {
+        $LogonUiPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI"
+        $LastUser = (Get-ItemProperty -LiteralPath $LogonUiPath -Name "LastLoggedOnUser" -ErrorAction Stop).LastLoggedOnUser
+        $LastUser = ConvertTo-CleanSingleLine -Value $LastUser -Fallback ""
+
+        if (-not [string]::IsNullOrWhiteSpace($LastUser)) {
+            return $LastUser
+        }
+    }
+    catch {
+        # Controlled fallback below.
+    }
+
+    return "Not available"
 }
 
 function Get-DeviceBlocks {
@@ -355,14 +388,11 @@ try {
         exit 0
     }
 
-    $LastLoggedInUser = if ($PSBoundParameters.ContainsKey("TestLastLoggedInUser")) {
-        $TestLastLoggedInUser
+    $LastActiveUser = if ($PSBoundParameters.ContainsKey("TestLastActiveUser")) {
+        $TestLastActiveUser
     }
     else {
-        Get-SecondaryFieldValue `
-            -Name $CustomFields.LastLoggedInUser `
-            -Type "Text" `
-            -Fallback "Not available"
+        Get-LastActiveUser
     }
 
     $CurrentDevices = if ($PSBoundParameters.ContainsKey("TestCurrentDevices")) {
@@ -385,8 +415,8 @@ try {
             -Fallback ""
     }
 
-    $LastLoggedInUser = ConvertTo-CleanSingleLine `
-        -Value $LastLoggedInUser `
+    $LastActiveUser = ConvertTo-CleanSingleLine `
+        -Value $LastActiveUser `
         -Fallback "Not available"
 
     $DeviceSummary = Format-ConnectedDevices -CurrentDevices ([string]$CurrentDevices)
@@ -395,7 +425,7 @@ try {
     $Sections = @(
         "DEVICE_DETECTIVE_ALERT"
         "Status: $Status"
-        "Last logged-in user: $LastLoggedInUser"
+        "Last active user: $LastActiveUser"
         "Connected devices: $DeviceSummary"
     )
 
