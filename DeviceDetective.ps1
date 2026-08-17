@@ -74,8 +74,9 @@ $CustomFields = @{
 # Prevent excessively large values from being written to multiline fields.
 $MaximumMultiLineLength = 9000
 
-# Prevent repeated GitHub downloads when a valid but unknown model remains connected.
-$MinimumMissingModelRefreshAgeHours = 24
+# Prevent repeated GitHub downloads while still allowing endpoints to discover
+# database changes for missing, Known, or Unknown VID/PID models.
+$MinimumAutomaticDatabaseRefreshAgeHours = 24
 
 # ---------------------------------------------------------------------------
 # Functions
@@ -1530,29 +1531,54 @@ try {
     $CurrentDevices = @(Get-CurrentDeviceModels)
     $CurrentDevices = @(Resolve-DeviceModels -Devices $CurrentDevices -Database $Database)
 
-    $DatabaseRefreshedForMissingModel = $false
+    $DatabaseRefreshedForReviewCandidate = $false
+
+    # A refresh candidate is a valid VID/PID model that either:
+    #   1. is completely missing from the local database, or
+    #   2. currently resolves as Known/Unknown.
+    #
+    # The second case lets an endpoint discover a central database change such
+    # as Known -> Approved without requiring a manual Refresh Database action.
+    # The age gate prevents a genuinely Known/Unknown device from causing a
+    # GitHub download every time Device Detective runs.
     $MissingValidModelsBeforeRefresh = @(
         $CurrentDevices | Where-Object {
             $_.HasValidVidPid -and -not $_.LookupMatched
         }
     )
 
+    $KnownOrUnknownValidModelsBeforeRefresh = @(
+        $CurrentDevices | Where-Object {
+            $_.HasValidVidPid -and
+            $_.Classification -in @("Known", "Unknown")
+        }
+    )
+
+    $AutomaticRefreshCandidates = @(
+        $CurrentDevices | Where-Object {
+            $_.HasValidVidPid -and (
+                -not $_.LookupMatched -or
+                $_.Classification -in @("Known", "Unknown")
+            )
+        }
+    )
+
     $DatabaseAgeHours = ((Get-Date).ToUniversalTime() - (Get-Item -LiteralPath $DatabasePath).LastWriteTimeUtc).TotalHours
-    $MissingModelRefreshAllowed = $DatabaseAgeHours -ge $MinimumMissingModelRefreshAgeHours
+    $AutomaticDatabaseRefreshAllowed = $DatabaseAgeHours -ge $MinimumAutomaticDatabaseRefreshAgeHours
 
     if (
-        $MissingValidModelsBeforeRefresh.Count -gt 0 -and
+        $AutomaticRefreshCandidates.Count -gt 0 -and
         -not $DatabaseNeedsDownload -and
-        $MissingModelRefreshAllowed
+        $AutomaticDatabaseRefreshAllowed
     ) {
         Write-DeviceDetectiveLog `
             -Level "WARNING" `
-            -Message "$($MissingValidModelsBeforeRefresh.Count) valid VID/PID model(s) were not found in the local database. The cache is $([math]::Round($DatabaseAgeHours, 1)) hour(s) old, so the database will be refreshed once and lookup retried."
+            -Message "$($AutomaticRefreshCandidates.Count) valid VID/PID model(s) are missing from the local database or currently classified as Known/Unknown. The cache is $([math]::Round($DatabaseAgeHours, 1)) hour(s) old, so the database will be refreshed once and classification retried."
 
         try {
             $DatabaseResult = Install-DeviceDatabase
             Set-DeviceDetectiveProperty -Name $CustomFields.DatabaseHash -Value $DatabaseResult.Hash -Type "Text"
-            $DatabaseRefreshedForMissingModel = $true
+            $DatabaseRefreshedForReviewCandidate = $true
             $DatabaseNeedsDownload = $true
 
             $Database = @(Import-DeviceDatabase -Path $DatabasePath)
@@ -1561,13 +1587,13 @@ try {
         catch {
             Write-DeviceDetectiveLog `
                 -Level "WARNING" `
-                -Message "Database refresh for missing VID/PID models failed. Continuing with the trusted local results. Error: $($_.Exception.Message)"
+                -Message "Automatic database refresh for missing or Known/Unknown VID/PID models failed. Continuing with the trusted local results. Error: $($_.Exception.Message)"
         }
     }
-    elseif ($MissingValidModelsBeforeRefresh.Count -gt 0 -and -not $DatabaseNeedsDownload) {
+    elseif ($AutomaticRefreshCandidates.Count -gt 0 -and -not $DatabaseNeedsDownload) {
         Write-DeviceDetectiveLog `
             -Level "WARNING" `
-            -Message "$($MissingValidModelsBeforeRefresh.Count) valid VID/PID model(s) were not found, but the database cache is only $([math]::Round($DatabaseAgeHours, 1)) hour(s) old. Skipping GitHub refresh to prevent repeated downloads."
+            -Message "$($AutomaticRefreshCandidates.Count) valid VID/PID model(s) are missing or currently Known/Unknown, but the database cache is only $([math]::Round($DatabaseAgeHours, 1)) hour(s) old. Skipping GitHub refresh until the cache reaches $MinimumAutomaticDatabaseRefreshAgeHours hour(s)."
     }
 
     $InventoryStatus = Get-InventoryStatus -Devices $CurrentDevices
@@ -1769,9 +1795,11 @@ try {
         "Valid VID/PID product rows: $($DatabaseResult.ProductRows)"
         "Requested action: $Action"
         "GitHub contacted: $DatabaseNeedsDownload"
-        "Database refreshed because valid VID/PID models were missing: $DatabaseRefreshedForMissingModel"
-        "Database age before missing-model refresh check: $([math]::Round($DatabaseAgeHours, 1)) hours"
-        "Minimum age before automatic missing-model refresh: $MinimumMissingModelRefreshAgeHours hours"
+        "Missing valid VID/PID models before automatic refresh: $($MissingValidModelsBeforeRefresh.Count)"
+        "Known/Unknown valid VID/PID models before automatic refresh: $($KnownOrUnknownValidModelsBeforeRefresh.Count)"
+        "Database refreshed for missing or Known/Unknown VID/PID models: $DatabaseRefreshedForReviewCandidate"
+        "Database age before automatic refresh check: $([math]::Round($DatabaseAgeHours, 1)) hours"
+        "Minimum age before automatic database refresh: $MinimumAutomaticDatabaseRefreshAgeHours hours"
         ""
         "Note: specialized reporting for keyboards or mice removed from otherwise unused computers is planned for a future version."
     ) -join [Environment]::NewLine
