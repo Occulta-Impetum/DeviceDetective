@@ -65,6 +65,7 @@ function ConvertTo-CleanSingleLine {
         [AllowNull()]
         [object]$Value,
 
+        [AllowEmptyString()]
         [string]$Fallback = ""
     )
 
@@ -152,6 +153,7 @@ function Get-SecondaryFieldValue {
         [string]$Type,
 
         [Parameter(Mandatory)]
+        [AllowEmptyString()]
         [string]$Fallback
     )
 
