@@ -62,6 +62,7 @@ $ValidClassifications = @(
 
 $CustomFields = @{
     Action         = "deviceDetectiveAction"
+    AlertDevices   = "deviceDetectiveAlertDevices"
     Baseline       = "deviceDetectiveBaseline"
     CurrentDevices = "deviceDetectiveCurrentDevices"
     DatabaseHash   = "deviceDetectiveDatabaseHash"
@@ -1138,6 +1139,119 @@ function Get-BaselineRecordKey {
     return "NONSTANDARD|$($Fallback.ToUpperInvariant())"
 }
 
+function Get-CurrentDeviceIdentityKey {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Device
+    )
+
+    $VendorID = ([string]$Device.VendorID).Trim().ToUpperInvariant()
+    $ProductID = ([string]$Device.ProductID).Trim().ToUpperInvariant()
+
+    if (
+        $VendorID -match '^[0-9A-F]{4}$' -and
+        $ProductID -match '^[0-9A-F]{4}$'
+    ) {
+        return "VIDPID|$VendorID|$ProductID"
+    }
+
+    $Fallback = ([string]$Device.FullDeviceData).Trim()
+
+    if ([string]::IsNullOrWhiteSpace($Fallback)) {
+        return ""
+    }
+
+    return "NONSTANDARD|$($Fallback.ToUpperInvariant())"
+}
+
+function Get-AlertDevices {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [array]$CurrentDevices,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [array]$ReviewDevices,
+
+        [Parameter(Mandatory)]
+        [object]$Comparison,
+
+        [Parameter(Mandatory)]
+        [bool]$BaselineExists,
+
+        [Parameter(Mandatory)]
+        [string]$Status
+    )
+
+    # Normal state never carries stale alert-device data.
+    if ($Status -eq "Normal") {
+        return @()
+    }
+
+    # Prohibited devices always belong in the alert field while present.
+    if ($Status -eq "Prohibited Device") {
+        return @(
+            $CurrentDevices |
+            Where-Object { $_.Classification -eq "Prohibited" }
+        )
+    }
+
+    # Device Detective Error is not a device-classification event. The alert
+    # evaluator will use the status/details path instead.
+    if ($Status -eq "Error") {
+        return @()
+    }
+
+    if ($Status -ne "Review Required") {
+        return @()
+    }
+
+    # With no accepted baseline yet, every current non-approved model is part
+    # of the review state.
+    if (-not $BaselineExists) {
+        return @($ReviewDevices)
+    }
+
+    # Once a baseline exists, include only current non-approved devices that
+    # were actually added or changed relative to that accepted baseline.
+    # This prevents manually accepted Known/Unknown devices from being repeated
+    # in a later ticket when some other device causes the alert.
+    $AlertKeys = @{}
+
+    foreach ($Record in @($Comparison.Added)) {
+        if ($null -ne $Record) {
+            $Key = Get-BaselineRecordKey -Record $Record
+            if (-not [string]::IsNullOrWhiteSpace($Key)) {
+                $AlertKeys[$Key] = $true
+            }
+        }
+    }
+
+    foreach ($Change in @($Comparison.Changed)) {
+        if ($null -ne $Change -and $null -ne $Change.After) {
+            $Key = Get-BaselineRecordKey -Record $Change.After
+            if (-not [string]::IsNullOrWhiteSpace($Key)) {
+                $AlertKeys[$Key] = $true
+            }
+        }
+    }
+
+    if ($AlertKeys.Count -eq 0) {
+        return @()
+    }
+
+    return @(
+        $CurrentDevices |
+        Where-Object {
+            $_.Classification -in @("Known", "Unknown", "Prohibited") -and
+            $AlertKeys.ContainsKey((Get-CurrentDeviceIdentityKey -Device $_))
+        }
+    )
+}
+
 function New-MatchingBaselineComparison {
     [CmdletBinding()]
     param()
@@ -1343,6 +1457,7 @@ try {
 
             Set-DeviceDetectiveProperty -Name $CustomFields.Baseline -Value "" -Type "MultiLine"
             Set-DeviceDetectiveProperty -Name $CustomFields.CurrentDevices -Value "" -Type "MultiLine"
+            Set-DeviceDetectiveProperty -Name $CustomFields.AlertDevices -Value "" -Type "MultiLine"
             Set-DeviceDetectiveProperty -Name $CustomFields.DatabaseHash -Value "" -Type "Text"
             $ForceDatabaseRefresh = $true
         }
@@ -1591,6 +1706,22 @@ try {
         $BaselineActionSummary = "The accepted baseline was retained because the changed state contains a Known, Unknown, or Prohibited device."
     }
 
+    $AlertDevices = @(
+        Get-AlertDevices `
+            -CurrentDevices $CurrentDevices `
+            -ReviewDevices $ReviewDevices `
+            -Comparison $ReportedBaselineComparison `
+            -BaselineExists $BaselineExists `
+            -Status $Status
+    )
+
+    $AlertDeviceText = if ($AlertDevices.Count -gt 0) {
+        Limit-MultiLineValue -Value (Format-CurrentDevices -Devices $AlertDevices)
+    }
+    else {
+        ""
+    }
+
     $BaselineChangeSummary = if (-not $BaselineExists) {
         "No accepted baseline exists for comparison."
     }
@@ -1623,6 +1754,7 @@ try {
         "Unknown: $UnknownCount"
         "Prohibited: $ProhibitedCount"
         "Ignored: $IgnoredCount"
+        "Alert devices: $($AlertDevices.Count)"
         ""
         $ReviewSummary
         $ReviewContextSummary
@@ -1647,6 +1779,11 @@ try {
     Set-DeviceDetectiveProperty `
         -Name $CustomFields.CurrentDevices `
         -Value $CurrentDeviceText `
+        -Type "MultiLine"
+
+    Set-DeviceDetectiveProperty `
+        -Name $CustomFields.AlertDevices `
+        -Value $AlertDeviceText `
         -Type "MultiLine"
 
     Set-DeviceDetectiveProperty `
@@ -1676,6 +1813,7 @@ catch {
     Write-DeviceDetectiveLog -Level "ERROR" -Message $ErrorMessage
 
     try {
+        Set-DeviceDetectiveProperty -Name $CustomFields.AlertDevices -Value "" -Type "MultiLine"
         Set-DeviceDetectiveProperty -Name $CustomFields.Status -Value "Error" -Type "Dropdown"
         Set-DeviceDetectiveProperty `
             -Name $CustomFields.Details `
