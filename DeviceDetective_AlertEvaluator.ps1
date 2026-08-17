@@ -19,9 +19,9 @@
     Uses NinjaOne's current Get-NinjaProperty cmdlet.
 
     Known Device Detective custom-field scripting names:
-      Status          : deviceDetectiveStatus
-      Current Devices : deviceDetectiveCurrentDevices
-      Details         : deviceDetectiveDetails
+      Status        : deviceDetectiveStatus
+      Alert Devices : deviceDetectiveAlertDevices
+      Details       : deviceDetectiveDetails
 
     User context is read locally from Windows only when Device Detective is
     non-Normal. The script does not depend on NinjaOne's built-in Last Login
@@ -33,7 +33,7 @@ param(
     # Optional test overrides. Leave unset in production.
     [string]$TestStatus,
     [string]$TestLastActiveUser,
-    [string]$TestCurrentDevices,
+    [string]$TestAlertDevices,
     [string]$TestDetails
 )
 
@@ -45,15 +45,15 @@ $ErrorActionPreference = "Stop"
 # ---------------------------------------------------------------------------
 
 $CustomFields = @{
-    Status         = "deviceDetectiveStatus"
-    CurrentDevices = "deviceDetectiveCurrentDevices"
-    Details        = "deviceDetectiveDetails"
+    Status       = "deviceDetectiveStatus"
+    AlertDevices = "deviceDetectiveAlertDevices"
+    Details      = "deviceDetectiveDetails"
 }
 
 # Keep the ticket output concise even if a multiline custom field grows large.
 $MaximumOutputLength        = 6000
 $MaximumDeviceSectionLength = 4000
-$MaximumDetailsLength       = 1200
+$MaximumDetailsLength       = 1000
 
 # ---------------------------------------------------------------------------
 # Functions
@@ -207,14 +207,14 @@ function Get-DeviceBlocks {
     [CmdletBinding()]
     param(
         [AllowNull()]
-        [string]$CurrentDevices
+        [string]$AlertDevices
     )
 
-    if ([string]::IsNullOrWhiteSpace($CurrentDevices)) {
+    if ([string]::IsNullOrWhiteSpace($AlertDevices)) {
         return @()
     }
 
-    $Normalized = $CurrentDevices -replace "`r`n", "`n" -replace "`r", "`n"
+    $Normalized = $AlertDevices -replace "`r`n", "`n" -replace "`r", "`n"
 
     # Device Detective separates models with a blank line. Split on one or more
     # blank lines while tolerating whitespace on otherwise empty lines.
@@ -302,25 +302,26 @@ function ConvertTo-DeviceSummary {
     }
 }
 
-function Format-ConnectedDevices {
+function Format-AlertDevices {
     [CmdletBinding()]
     param(
         [AllowNull()]
-        [string]$CurrentDevices
+        [string]$AlertDevices
     )
 
-    $Blocks = @(Get-DeviceBlocks -CurrentDevices $CurrentDevices)
+    $Blocks = @(Get-DeviceBlocks -AlertDevices $AlertDevices)
 
     if ($Blocks.Count -eq 0) {
-        return "No device data returned"
+        return "No alert device data returned"
     }
 
     $Summaries = foreach ($Block in $Blocks) {
         ConvertTo-DeviceSummary -Block $Block
     }
 
-    # Put the devices most useful for ticket review first so truncation retains
-    # Prohibited/Unknown/Known entries before Approved devices.
+    # Alert Devices should already contain only the models responsible for the
+    # current alert. Keep deterministic priority ordering if multiple devices
+    # are present.
     $Text = @(
         $Summaries |
         Sort-Object Priority, Text |
@@ -397,22 +398,12 @@ try {
         Get-LastActiveUser
     }
 
-    $CurrentDevices = if ($PSBoundParameters.ContainsKey("TestCurrentDevices")) {
-        $TestCurrentDevices
+    $AlertDevices = if ($PSBoundParameters.ContainsKey("TestAlertDevices")) {
+        $TestAlertDevices
     }
     else {
         Get-SecondaryFieldValue `
-            -Name $CustomFields.CurrentDevices `
-            -Type "Multiline" `
-            -Fallback ""
-    }
-
-    $Details = if ($PSBoundParameters.ContainsKey("TestDetails")) {
-        $TestDetails
-    }
-    else {
-        Get-SecondaryFieldValue `
-            -Name $CustomFields.Details `
+            -Name $CustomFields.AlertDevices `
             -Type "Multiline" `
             -Fallback ""
     }
@@ -421,18 +412,35 @@ try {
         -Value $LastActiveUser `
         -Fallback "Not available"
 
-    $DeviceSummary = Format-ConnectedDevices -CurrentDevices ([string]$CurrentDevices)
-    $ConciseDetails = Get-ConciseDetails -Details ([string]$Details)
+    $DeviceSummary = Format-AlertDevices -AlertDevices ([string]$AlertDevices)
 
     $Sections = @(
         "DEVICE_DETECTIVE_ALERT"
         "Status: $Status"
         "Last active user: $LastActiveUser"
-        "Connected devices: $DeviceSummary"
+        "Alert devices: $DeviceSummary"
     )
 
-    if (-not [string]::IsNullOrWhiteSpace($ConciseDetails)) {
-        $Sections += "Details: $ConciseDetails"
+    # Device Detective Error is not necessarily associated with a specific
+    # device. In that state only, include a concise portion of the Details field
+    # so the ticket contains the Device Detective failure context. For all other
+    # alert states, the purpose-built Alert Devices field is the ticket payload.
+    if ($Status -ceq "Error") {
+        $Details = if ($PSBoundParameters.ContainsKey("TestDetails")) {
+            $TestDetails
+        }
+        else {
+            Get-SecondaryFieldValue `
+                -Name $CustomFields.Details `
+                -Type "Multiline" `
+                -Fallback ""
+        }
+
+        $ConciseDetails = Get-ConciseDetails -Details ([string]$Details)
+
+        if (-not [string]::IsNullOrWhiteSpace($ConciseDetails)) {
+            $Sections += "Details: $ConciseDetails"
+        }
     }
 
     Write-EvaluationResult -Value ($Sections -join " | ")
