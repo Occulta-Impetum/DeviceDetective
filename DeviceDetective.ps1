@@ -1258,10 +1258,11 @@ function New-MatchingBaselineComparison {
     param()
 
     return [PSCustomObject]@{
-        Matches = $true
-        Added   = @()
-        Removed = @()
-        Changed = @()
+        Matches         = $true
+        Added           = @()
+        Removed         = @()
+        Changed         = @()
+        MetadataChanged = @()
     }
 }
 
@@ -1293,6 +1294,7 @@ function Compare-BaselineRecords {
     $Added = @()
     $Removed = @()
     $Changed = @()
+    $MetadataChanged = @()
 
     foreach ($Key in $CurrentByKey.Keys) {
         if (-not $BaselineByKey.ContainsKey($Key)) {
@@ -1305,17 +1307,45 @@ function Compare-BaselineRecords {
 
         $BeforeClassification = ([string]$Before.Classification).Trim()
         $AfterClassification = ([string]$After.Classification).Trim()
+
+        # Device-state comparison is intentionally limited to canonical model
+        # identity (the dictionary key) plus Classification. Descriptive
+        # database metadata must never make an otherwise identical accepted
+        # device appear Added/Removed/Changed.
+        if (
+            -not $BeforeClassification.Equals(
+                $AfterClassification,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )
+        ) {
+            $Changed += [PSCustomObject]@{
+                Key    = $Key
+                Before = $Before
+                After  = $After
+            }
+
+            continue
+        }
+
+        # Keep friendly-name corrections visible for troubleshooting, but make
+        # them informational only. They do not affect Matches, alert status, or
+        # Alert Devices.
         $BeforeVendorName = ([string]$Before.VendorName).Trim()
         $AfterVendorName = ([string]$After.VendorName).Trim()
         $BeforeProductName = ([string]$Before.ProductName).Trim()
         $AfterProductName = ([string]$After.ProductName).Trim()
 
         if (
-            -not $BeforeClassification.Equals($AfterClassification, [System.StringComparison]::OrdinalIgnoreCase) -or
-            -not $BeforeVendorName.Equals($AfterVendorName, [System.StringComparison]::OrdinalIgnoreCase) -or
-            -not $BeforeProductName.Equals($AfterProductName, [System.StringComparison]::OrdinalIgnoreCase)
+            -not $BeforeVendorName.Equals(
+                $AfterVendorName,
+                [System.StringComparison]::OrdinalIgnoreCase
+            ) -or
+            -not $BeforeProductName.Equals(
+                $AfterProductName,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )
         ) {
-            $Changed += [PSCustomObject]@{
+            $MetadataChanged += [PSCustomObject]@{
                 Key    = $Key
                 Before = $Before
                 After  = $After
@@ -1330,10 +1360,15 @@ function Compare-BaselineRecords {
     }
 
     return [PSCustomObject]@{
-        Matches = ($Added.Count -eq 0 -and $Removed.Count -eq 0 -and $Changed.Count -eq 0)
-        Added   = @($Added | Sort-Object Key)
-        Removed = @($Removed | Sort-Object Key)
-        Changed = @($Changed | Sort-Object Key)
+        Matches = (
+            $Added.Count -eq 0 -and
+            $Removed.Count -eq 0 -and
+            $Changed.Count -eq 0
+        )
+        Added           = @($Added | Sort-Object Key)
+        Removed         = @($Removed | Sort-Object Key)
+        Changed         = @($Changed | Sort-Object Key)
+        MetadataChanged = @($MetadataChanged | Sort-Object Key)
     }
 }
 
@@ -1364,11 +1399,14 @@ function Format-BaselineChanges {
         [object]$Comparison
     )
 
-    if ($Comparison.Matches) {
-        return 'Current devices match the accepted baseline.'
-    }
+    $Lines = @()
 
-    $Lines = @('Device state differs from the accepted baseline.')
+    if ($Comparison.Matches) {
+        $Lines += 'Current device identities and classifications match the accepted baseline.'
+    }
+    else {
+        $Lines += 'Device state differs from the accepted baseline.'
+    }
 
     if ($Comparison.Added.Count -gt 0) {
         $Lines += ''
@@ -1384,8 +1422,20 @@ function Format-BaselineChanges {
 
     if ($Comparison.Changed.Count -gt 0) {
         $Lines += ''
-        $Lines += 'Classification or friendly-name changes:'
+        $Lines += 'Classification changes:'
         $Lines += @($Comparison.Changed | ForEach-Object {
+            '- {0} -> {1}' -f (
+                Format-BaselineDeviceSummary -Record $_.Before
+            ), (
+                Format-BaselineDeviceSummary -Record $_.After
+            )
+        })
+    }
+
+    if ($Comparison.MetadataChanged.Count -gt 0) {
+        $Lines += ''
+        $Lines += 'Informational database metadata changes (do not affect baseline match; accepted baseline metadata synchronized):'
+        $Lines += @($Comparison.MetadataChanged | ForEach-Object {
             '- {0} -> {1}' -f (
                 Format-BaselineDeviceSummary -Record $_.Before
             ), (
@@ -1641,6 +1691,60 @@ try {
         ).Count -eq 0
     )
 
+    # For an existing baseline, evaluate only what actually changed.
+    # Previously accepted Known/Unknown devices that are unchanged must not
+    # block safe updates elsewhere on the computer.
+    #
+    # Automatically acceptable deltas:
+    #   - a newly added model that is Approved
+    #   - an existing model whose classification changed to Approved
+    #   - a baseline model that is still physically present but is now Ignored
+    #
+    # Not automatically acceptable:
+    #   - newly added Known/Unknown/Prohibited models
+    #   - classification changes to Known/Unknown/Prohibited
+    #   - a model that is actually no longer present
+    $CurrentDeviceByKey = @{}
+
+    foreach ($Device in $CurrentDevices) {
+        $CurrentKey = Get-CurrentDeviceIdentityKey -Device $Device
+
+        if (-not [string]::IsNullOrWhiteSpace($CurrentKey)) {
+            $CurrentDeviceByKey[$CurrentKey] = $Device
+        }
+    }
+
+    $UnsafeAddedBaselineRecords = @(
+        $BaselineComparison.Added |
+        Where-Object { $_.Classification -ne "Approved" }
+    )
+
+    $UnsafeChangedBaselineRecords = @(
+        $BaselineComparison.Changed |
+        Where-Object { $_.After.Classification -ne "Approved" }
+    )
+
+    $UnsafeRemovedBaselineRecords = @(
+        $BaselineComparison.Removed |
+        Where-Object {
+            $RemovedKey = Get-BaselineRecordKey -Record $_
+
+            if (-not $CurrentDeviceByKey.ContainsKey($RemovedKey)) {
+                return $true
+            }
+
+            return $CurrentDeviceByKey[$RemovedKey].Classification -ne "Ignored"
+        }
+    )
+
+    $AllBaselineChangesAutomaticallyAcceptable = (
+        $BaselineExists -and
+        -not $BaselineComparison.Matches -and
+        $UnsafeAddedBaselineRecords.Count -eq 0 -and
+        $UnsafeChangedBaselineRecords.Count -eq 0 -and
+        $UnsafeRemovedBaselineRecords.Count -eq 0
+    )
+
     $BaselineActionSummary = "No baseline change was made."
     $Status = $InventoryStatus
     $ResetActionAfterRun = $Action -in @("Refresh Database", "Reset Local Data")
@@ -1713,18 +1817,36 @@ try {
     }
     elseif ($BaselineComparison.Matches) {
         # A manually accepted Known or Unknown model remains normal while the
-        # current state continues to match the accepted baseline.
+        # current device identities and classifications continue to match the
+        # accepted baseline.
         $Status = if ($ProhibitedCount -gt 0) { "Prohibited Device" } else { "Normal" }
-        $BaselineActionSummary = "No baseline change was made."
+
+        if ($BaselineComparison.MetadataChanged.Count -gt 0) {
+            # Descriptive database metadata is not part of device identity and
+            # must never trigger Review Required. Keep the informational
+            # comparison for Details, but silently rewrite the accepted baseline
+            # so VendorName/ProductName corrections do not remain stale.
+            $NewBaselineValue = ConvertTo-BaselineValue -Records $CurrentBaselineRecords
+            Set-DeviceDetectiveProperty -Name $CustomFields.Baseline -Value $NewBaselineValue -Type "MultiLine"
+            $BaselineRecords = $CurrentBaselineRecords
+
+            $BaselineActionSummary = "The accepted baseline metadata was updated automatically because device identities and classifications still match."
+            Write-DeviceDetectiveLog $BaselineActionSummary
+        }
+        else {
+            $BaselineActionSummary = "No baseline change was made."
+        }
     }
-    elseif ($AllCurrentDevicesAutomaticallyAcceptable) {
+    elseif ($AllBaselineChangesAutomaticallyAcceptable) {
         $NewBaselineValue = ConvertTo-BaselineValue -Records $CurrentBaselineRecords
         Set-DeviceDetectiveProperty -Name $CustomFields.Baseline -Value $NewBaselineValue -Type "MultiLine"
         $BaselineRecords = $CurrentBaselineRecords
         $BaselineComparison = New-MatchingBaselineComparison
-        $ReportedBaselineComparison = $BaselineComparison
         $Status = "Normal"
-        $BaselineActionSummary = "The accepted baseline was updated automatically because all current devices are Approved or Ignored."
+
+        # Keep ReportedBaselineComparison unchanged so Details still shows the
+        # safe delta that was incorporated into the accepted baseline.
+        $BaselineActionSummary = "The accepted baseline was updated automatically because all detected device-state changes were safe to accept."
         Write-DeviceDetectiveLog $BaselineActionSummary
     }
     else {
@@ -1758,7 +1880,6 @@ try {
     $ReviewContextSummary = if (
         $ReviewDevices.Count -gt 0 -and
         $BaselineExists -and
-        $ReportedBaselineComparison.Matches -and
         $Status -eq "Normal"
     ) {
         "These non-approved devices are part of the accepted baseline for this computer."
@@ -1781,6 +1902,9 @@ try {
         "Prohibited: $ProhibitedCount"
         "Ignored: $IgnoredCount"
         "Alert devices: $($AlertDevices.Count)"
+        "Unsafe added baseline changes: $($UnsafeAddedBaselineRecords.Count)"
+        "Unsafe classification changes: $($UnsafeChangedBaselineRecords.Count)"
+        "Unsafe removed baseline changes: $($UnsafeRemovedBaselineRecords.Count)"
         ""
         $ReviewSummary
         $ReviewContextSummary
