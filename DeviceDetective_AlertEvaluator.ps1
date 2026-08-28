@@ -55,6 +55,15 @@ $MaximumOutputLength        = 6000
 $MaximumDeviceSectionLength = 4000
 $MaximumDetailsLength       = 1000
 
+# NinjaOne custom fields can be temporarily unavailable while the agent and
+# policy metadata initialize after a reboot. Retry status reads before falling
+# back to the last authoritative evaluator result during a bounded grace period.
+$StatusReadMaximumAttempts    = 3
+$StatusReadRetryDelaySeconds  = 10
+$StartupGracePeriodMinutes    = 15
+$RootPath                     = Join-Path $env:ProgramData "SysAdminBot\DeviceDetective"
+$EvaluatorCachePath           = Join-Path $RootPath "AlertEvaluator.last-result.txt"
+
 # ---------------------------------------------------------------------------
 # Functions
 # ---------------------------------------------------------------------------
@@ -141,6 +150,94 @@ function Get-NinjaFieldValue {
     }
     catch {
         throw "Unable to read NinjaOne custom field '$Name': $($_.Exception.Message)"
+    }
+}
+
+function Get-NinjaFieldValueWithRetry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name,
+
+        [string]$Type,
+
+        [Parameter(Mandatory)]
+        [ValidateRange(1, 20)]
+        [int]$MaximumAttempts,
+
+        [Parameter(Mandatory)]
+        [ValidateRange(0, 300)]
+        [int]$RetryDelaySeconds
+    )
+
+    $LastError = $null
+
+    for ($Attempt = 1; $Attempt -le $MaximumAttempts; $Attempt++) {
+        try {
+            return Get-NinjaFieldValue -Name $Name -Type $Type
+        }
+        catch {
+            $LastError = $_
+
+            if ($Attempt -lt $MaximumAttempts) {
+                Start-Sleep -Seconds $RetryDelaySeconds
+            }
+        }
+    }
+
+    throw $LastError
+}
+
+function Get-MinutesSinceStartup {
+    [CmdletBinding()]
+    param()
+
+    try {
+        $OperatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+
+        if ($null -eq $OperatingSystem.LastBootUpTime) {
+            return $null
+        }
+
+        return ((Get-Date) - ([datetime]$OperatingSystem.LastBootUpTime)).TotalMinutes
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-CachedEvaluationResult {
+    [CmdletBinding()]
+    param()
+
+    try {
+        if (-not (Test-Path -LiteralPath $EvaluatorCachePath -PathType Leaf)) {
+            return ""
+        }
+
+        return [string](Get-Content -LiteralPath $EvaluatorCachePath -Raw -ErrorAction Stop)
+    }
+    catch {
+        return ""
+    }
+}
+
+function Save-CachedEvaluationResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Value
+    )
+
+    try {
+        if (-not (Test-Path -LiteralPath $RootPath)) {
+            New-Item -Path $RootPath -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+
+        Set-Content -LiteralPath $EvaluatorCachePath -Value $Value -Encoding UTF8 -Force -ErrorAction Stop
+    }
+    catch {
+        # Cache failures must not change the authoritative evaluation result.
     }
 }
 
@@ -373,10 +470,37 @@ try {
             $TestStatus
         }
         else {
-            Get-NinjaFieldValue -Name $CustomFields.Status -Type "Dropdown"
+            Get-NinjaFieldValueWithRetry `
+                -Name $CustomFields.Status `
+                -Type "Dropdown" `
+                -MaximumAttempts $StatusReadMaximumAttempts `
+                -RetryDelaySeconds $StatusReadRetryDelaySeconds
         }
     }
     catch {
+        $MinutesSinceStartup = Get-MinutesSinceStartup
+
+        if (
+            $null -ne $MinutesSinceStartup -and
+            $MinutesSinceStartup -le $StartupGracePeriodMinutes
+        ) {
+            $CachedResult = ConvertTo-CleanSingleLine `
+                -Value (Get-CachedEvaluationResult) `
+                -Fallback ""
+
+            if (-not [string]::IsNullOrWhiteSpace($CachedResult)) {
+                Write-EvaluationResult -Value $CachedResult
+            }
+            else {
+                # A newly enrolled endpoint may not have an authoritative cache
+                # yet. Defer alerting during the startup grace period rather than
+                # create a false Helper Script Error ticket.
+                Write-EvaluationResult -Value "DEVICE_DETECTIVE_NORMAL"
+            }
+
+            exit 0
+        }
+
         $ErrorText = ConvertTo-CleanSingleLine -Value $_.Exception.Message -Fallback "Unable to read Device Detective status."
         $ErrorText = Limit-Text -Value $ErrorText -MaximumLength 800
 
@@ -387,7 +511,13 @@ try {
     $Status = ConvertTo-CleanSingleLine -Value $RawStatus -Fallback "Unknown"
 
     if ($Status -ceq "Normal") {
-        Write-EvaluationResult -Value "DEVICE_DETECTIVE_NORMAL"
+        $EvaluationResult = "DEVICE_DETECTIVE_NORMAL"
+
+        if (-not $UseTestStatus) {
+            Save-CachedEvaluationResult -Value $EvaluationResult
+        }
+
+        Write-EvaluationResult -Value $EvaluationResult
         exit 0
     }
 
@@ -443,7 +573,13 @@ try {
         }
     }
 
-    Write-EvaluationResult -Value ($Sections -join " | ")
+    $EvaluationResult = $Sections -join " | "
+
+    if (-not $UseTestStatus) {
+        Save-CachedEvaluationResult -Value $EvaluationResult
+    }
+
+    Write-EvaluationResult -Value $EvaluationResult
     exit 0
 }
 catch {
