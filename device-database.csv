@@ -2840,6 +2840,7 @@
 3538,0901,"Power Quotient International Co., Ltd",Traveling Disk U273 (4GB),Known,
 3554,,Redragon,,,
 3554,FA09,Redragon,Redragon wireless dongle,Approved,
+3554,FA07,Redragon,Redragon K710 Wireless Keyboard,Approved,
 3579,,DIVA,,,
 3579,6901,DIVA,Media Reader,Known,
 3636,,InVibro,,,
@@ -3949,8 +3950,8 @@
 03F0,4C17,"HP, Inc",EWS UPD,Approved,
 03F0,4D11,"HP, Inc",PSC 1400,Approved,
 03F0,4D17,"HP, Inc",EWS UPD,Approved,
-03F0,4F11,"HP, Inc",OfficeJet 5600 (USBHUB),Approved,
-03F0,4F17,"HP, Inc",Color LaserJet CM1312 MFP,Approved,LAG Provided
+03F0,4F11,"HP, Inc",OfficeJet 5600 (USBHUB),Approved,LAG Provided
+03F0,4F17,"HP, Inc",Color LaserJet CM1312 MFP,Approved,
 03F0,581D,"HP, Inc",lt4112 Gobi 4G Module Network Device,Approved,
 03F0,584A,"HP, Inc",HP Mouse,Approved,
 03F0,5A11,"HP, Inc",PhotoSmart C7100 series,Approved,
@@ -5930,8 +5931,8 @@
 0461,037B,"Primax Electronics, Ltd",Medion MD 6190 Scanner,Known,
 0461,037C,"Primax Electronics, Ltd",VistaScan Astra 3600(ENG),Known,
 0461,038A,"Primax Electronics, Ltd",UMAX Astra 3000/3600,Known,
-0461,038B,"Primax Electronics, Ltd",Xerox 2400 Onetouch,Known,
-0461,038C,"Primax Electronics, Ltd",UMAX Astra 4100,Known,LAG Provided
+0461,038B,"Primax Electronics, Ltd",Xerox 2400 Onetouch,Known,LAG Provided
+0461,038C,"Primax Electronics, Ltd",UMAX Astra 4100,Known,
 0461,03A8,"Primax Electronics, Ltd",9420M,Known,
 0461,3F41,"Primax Electronics, Ltd",HP Slim Keyboard,Approved,
 0461,081A,"Primax Electronics, Ltd",Fujifilm IX-30 Camera [storage mode],Known,
@@ -5963,8 +5964,8 @@
 0461,4DB1,"Primax Electronics, Ltd",Dell Laptop Integrated Webcam 2Mpix,Known,
 0461,4DE3,"Primax Electronics, Ltd",HP 5-Button Optical Comfort Mouse,Approved,
 0461,4DE7,"Primax Electronics, Ltd",webcam,Known,
-0461,4DFB,"Primax Electronics, Ltd",HP Mouse,Approved,
-0461,4141,"Primax Electronics, Ltd",HP Mouse,Approved,LAG Provided
+0461,4DFB,"Primax Electronics, Ltd",HP Mouse,Approved,LAG Provided
+0461,4141,"Primax Electronics, Ltd",HP Mouse,Approved,
 0461,4E6F,"Primax Electronics, Ltd",Acer Wired Keyboard Model KBAY211,Known,
 0461,574A,"Primax Electronics, Ltd",HP Mouse,Approved,
 0463,,MGE UPS Systems,,,
@@ -9071,8 +9072,8 @@
 04F2,0841,"Chicony Electronics Co., Ltd",HP Multimedia Keyboard,Approved,
 04F2,0860,"Chicony Electronics Co., Ltd",2.4G Multimedia Wireless Kit,Known,
 04F2,0939,"Chicony Electronics Co., Ltd",Amazon Basics mouse,Known,
-04F2,1061,"Chicony Electronics Co., Ltd",HP KG-1061 Wireless Keyboard+Mouse,Approved,
-04F2,1121,"Chicony Electronics Co., Ltd",Periboard 717 Mini Wireless Keyboard,Known,LAG Provided
+04F2,1061,"Chicony Electronics Co., Ltd",HP KG-1061 Wireless Keyboard+Mouse,Approved,LAG Provided
+04F2,1121,"Chicony Electronics Co., Ltd",Periboard 717 Mini Wireless Keyboard,Known,
 04F2,2159,"Chicony Electronics Co., Ltd",PERIBOARD-535 [Perixx Ergo Keyboard],Known,
 04F2,3F41,"Chicony Electronics Co., Ltd",HP Slim Keyboard,Approved,
 04F2,A001,"Chicony Electronics Co., Ltd",E-Video DC-100 Camera,Known,
@@ -18177,8 +18178,8 @@
 0D62,2026,Darfon Electronics Corp.,TECOM Bluetooth Device,Known,
 0D62,2050,Darfon Electronics Corp.,Mouse,Known,
 0D62,2106,Darfon Electronics Corp.,Dell L20U Multimedia Keyboard,Approved,
-0D62,001B,Darfon Electronics Corp.,Keyboard,Known,
-0D62,001C,Darfon Electronics Corp.,Benq X120 Internet Keyboard Pro,Known,LAG Provided
+0D62,001B,Darfon Electronics Corp.,Keyboard,Known,LAG Provided
+0D62,001C,Darfon Electronics Corp.,Benq X120 Internet Keyboard Pro,Known,
 0D62,12EC,Darfon Electronics Corp.,HP Mouse,Approved,
 0D62,3F41,Darfon Electronics Corp.,HP Slim Keyboard,Approved,
 0D62,910E,Darfon Electronics Corp.,HP Business Slim Keyboard,Approved,
@@ -21763,8 +21764,8 @@
 1C4B,026F,Geratherm Medical AG,Spirostik,Known,
 1C4F,,SiGma Micro,,,
 1C4F,0002,SiGma Micro,Keyboard TRACER Gamma Ivory,Known,
-1C4F,0003,SiGma Micro,HID controller,Known,
-1C4F,0026,SiGma Micro,Keyboard,Known,Left in place
+1C4F,0003,SiGma Micro,HID controller,Known,Left in place
+1C4F,0026,SiGma Micro,Keyboard,Known,
 1C4F,0032,SiGma Micro,Optical Mouse with Scroll Wheel,Known,
 1C4F,0034,SiGma Micro,XM102K Optical Wheel Mouse,Approved,
 1C4F,0063,SiGma Micro,Touchpad (integrated in detachable keyboard of Chuwi SurBook),Known,
