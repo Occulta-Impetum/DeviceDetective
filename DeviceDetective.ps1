@@ -78,6 +78,12 @@ $MaximumMultiLineLength = 9000
 # database changes for missing, Known, or Unknown VID/PID models.
 $MinimumAutomaticDatabaseRefreshAgeHours = 24
 
+# A successful Plug and Play query can briefly return zero monitored models
+# while Windows is still exposing devices after startup or wake. Retry a
+# bounded number of times before treating the result as an empty inventory.
+$DeviceEnumerationMaximumAttempts = 3
+$DeviceEnumerationRetryDelaySeconds = 10
+
 # ---------------------------------------------------------------------------
 # Functions
 # ---------------------------------------------------------------------------
@@ -1578,7 +1584,48 @@ try {
     }
 
     $Database = @(Import-DeviceDatabase -Path $DatabasePath)
-    $CurrentDevices = @(Get-CurrentDeviceModels)
+
+    # Read the accepted baseline before device collection. If Windows briefly
+    # returns zero monitored models after startup or wake, a non-empty accepted
+    # baseline tells us that the empty snapshot is not authoritative.
+    $BaselineValue = [string](Get-DeviceDetectiveProperty -Name $CustomFields.Baseline -Type "MultiLine")
+    $BaselineExists = -not [string]::IsNullOrWhiteSpace($BaselineValue)
+    $BaselineRecords = @(ConvertFrom-BaselineValue -Value $BaselineValue)
+
+    $CurrentDevices = @()
+
+    for ($EnumerationAttempt = 1; $EnumerationAttempt -le $DeviceEnumerationMaximumAttempts; $EnumerationAttempt++) {
+        $CurrentDevices = @(Get-CurrentDeviceModels)
+
+        if ($CurrentDevices.Count -gt 0) {
+            if ($EnumerationAttempt -gt 1) {
+                Write-DeviceDetectiveLog "Device enumeration succeeded on attempt $EnumerationAttempt of $DeviceEnumerationMaximumAttempts."
+            }
+
+            break
+        }
+
+        if ($EnumerationAttempt -lt $DeviceEnumerationMaximumAttempts) {
+            Write-DeviceDetectiveLog `
+                -Level "WARNING" `
+                -Message "Device enumeration attempt $EnumerationAttempt of $DeviceEnumerationMaximumAttempts returned zero monitored models. Retrying in $DeviceEnumerationRetryDelaySeconds second(s)."
+
+            Start-Sleep -Seconds $DeviceEnumerationRetryDelaySeconds
+        }
+    }
+
+    if (
+        $CurrentDevices.Count -eq 0 -and
+        $BaselineRecords.Count -gt 0 -and
+        $Action -ne "Approve Current Baseline"
+    ) {
+        Write-DeviceDetectiveLog `
+            -Level "WARNING" `
+            -Message "All $DeviceEnumerationMaximumAttempts device enumeration attempts returned zero monitored models while a non-empty accepted baseline exists. The scan is inconclusive, so the last authoritative NinjaOne status, device fields, details, last-run time, and baseline will be preserved."
+
+        exit 0
+    }
+
     $CurrentDevices = @(Resolve-DeviceModels -Devices $CurrentDevices -Database $Database)
 
     $DatabaseRefreshedForReviewCandidate = $false
@@ -1677,9 +1724,6 @@ try {
         ) -join [Environment]::NewLine
     }
 
-    $BaselineValue = [string](Get-DeviceDetectiveProperty -Name $CustomFields.Baseline -Type "MultiLine")
-    $BaselineExists = -not [string]::IsNullOrWhiteSpace($BaselineValue)
-    $BaselineRecords = @(ConvertFrom-BaselineValue -Value $BaselineValue)
     $CurrentBaselineRecords = @(ConvertTo-BaselineRecords -Devices $CurrentDevices)
     $BaselineComparison = Compare-BaselineRecords -BaselineRecords $BaselineRecords -CurrentRecords $CurrentBaselineRecords
     $ReportedBaselineComparison = $BaselineComparison
