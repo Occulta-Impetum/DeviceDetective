@@ -11816,6 +11816,7 @@
 05AC,129D,"Apple, Inc.",iPhone,Approved,
 05AC,129E,"Apple, Inc.",iPod Touch 4.Gen,Approved,
 05AC,129F,"Apple, Inc.",iPad 2,Approved,
+05AC,139A,"Apple, Inc.",Airpods,Approved,
 05AC,139D,"Apple, Inc.",Airpods,Approved,
 05AC,139E,"Apple, Inc.",Airpods,Approved,
 05AC,139F,"Apple, Inc.",Airpods,Approved,
@@ -18178,8 +18179,8 @@
 0D62,2021,Darfon Electronics Corp.,AM805 Keyboard,Known,
 0D62,2026,Darfon Electronics Corp.,TECOM Bluetooth Device,Known,
 0D62,2050,Darfon Electronics Corp.,Mouse,Known,
-0D62,2106,Darfon Electronics Corp.,Dell L20U Multimedia Keyboard,Approved,
-0D62,001B,Darfon Electronics Corp.,Keyboard,Known,LAG Provided
+0D62,2106,Darfon Electronics Corp.,Dell L20U Multimedia Keyboard,Approved,LAG Provided
+0D62,001B,Darfon Electronics Corp.,Keyboard,Known,
 0D62,001C,Darfon Electronics Corp.,Benq X120 Internet Keyboard Pro,Known,
 0D62,12EC,Darfon Electronics Corp.,HP Mouse,Approved,
 0D62,3F41,Darfon Electronics Corp.,HP Slim Keyboard,Approved,
@@ -21764,8 +21765,8 @@
 1C4B,,Geratherm Medical AG,,,
 1C4B,026F,Geratherm Medical AG,Spirostik,Known,
 1C4F,,SiGma Micro,,,
-1C4F,0002,SiGma Micro,Keyboard TRACER Gamma Ivory,Known,
-1C4F,0003,SiGma Micro,HID controller,Known,Left in place
+1C4F,0002,SiGma Micro,Keyboard TRACER Gamma Ivory,Known,Left in place
+1C4F,0003,SiGma Micro,HID controller,Known,
 1C4F,0026,SiGma Micro,Keyboard,Known,
 1C4F,0032,SiGma Micro,Optical Mouse with Scroll Wheel,Known,
 1C4F,0034,SiGma Micro,XM102K Optical Wheel Mouse,Approved,
