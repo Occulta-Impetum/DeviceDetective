@@ -60,7 +60,7 @@ $MaximumDetailsLength       = 1000
 # back to the last authoritative evaluator result during a bounded grace period.
 $StatusReadMaximumAttempts    = 3
 $StatusReadRetryDelaySeconds  = 10
-$StartupGracePeriodMinutes    = 15
+$StartupGracePeriodMinutes    = 60
 $RootPath                     = Join-Path $env:ProgramData "SysAdminBot\DeviceDetective"
 $EvaluatorCachePath           = Join-Path $RootPath "AlertEvaluator.last-result.txt"
 
