@@ -1,153 +1,114 @@
 # Device Detective
 
-Device Detective is a PowerShell-based endpoint monitoring tool designed to run through NinjaOne.
+Device Detective is a PowerShell-based endpoint monitoring system deployed through NinjaOne. It inventories currently present keyboards, mice, and HID-class devices, resolves supported USB and Bluetooth identifiers against a centrally maintained VID/PID database, compares the result with an accepted endpoint baseline, and exposes actionable state through NinjaOne custom fields and Script Result conditions.
 
-It inventories connected keyboards, mice, and HID-class devices, resolves their USB or Bluetooth VID/PID information against a centrally maintained database, and compares the current inventory with an accepted device baseline.
-
-The project was created to replace a Windows startup script that could delay login or leave computers stuck at **Please wait** when network or Active Directory dependencies were slow.
+It replaced an older Windows startup script that could delay login or leave computers at **Please wait** when network or Active Directory dependencies were unavailable.
 
 ## Current project status
 
-Device Detective is currently under development and pilot testing.
+Device Detective is operational in production.
 
-The following features are working:
+Current production behavior includes:
 
-- NinjaOne custom-field integration
-- GitHub-hosted device database
-- Local database caching
-- SHA-256 database validation
-- Local database tamper detection
-- Manual database refresh through NinjaOne
-- Mouse, keyboard, and HID-class enumeration
-- Standard USB VID/PID parsing
-- Bluetooth VID/PID parsing
-- Consolidation of duplicate HID interfaces
-- Exclusion of generic Bluetooth HID child interfaces
-- Friendly-name and classification lookup
-- Current-device reporting
-- Accepted device baselines
-- Automatic baseline creation for approved devices
-- Manual baseline approval
-- Added, removed, and reclassified device reporting
+- Hourly execution, 24 hours a day, through NinjaOne
+- Mouse, Keyboard, and HIDClass enumeration
+- USB and supported Bluetooth VID/PID parsing
+- Device-model consolidation
+- Central database lookup and classification
+- Trusted local database caching with SHA-256 validation
+- Endpoint-specific accepted baselines
+- Automatic acceptance of defined safe changes
+- NinjaOne custom-field reporting
+- A separate Alert Evaluator for NinjaOne Script Result conditions
+- Native NinjaOne-to-Zendesk ticket creation
+- Duplicate suppression during an active condition
+- Reset updates on the original ticket
+- Startup/reboot safeguards for transient zero-device and custom-field failures
 
-The following features are still planned:
+The following work remains planned or under observation:
 
-- NinjaOne alert conditions
-- Zendesk ticket creation and clearing
-- Scheduled pilot deployment
-- Specialized reporting for computers missing expected keyboards or mice
-- Broader production testing and documentation
-
-## How it works
-
-Device Detective follows this general workflow:
-
-1. NinjaOne runs the PowerShell script as `SYSTEM`.
-2. The script creates a local working directory under `ProgramData`.
-3. The device database is downloaded from GitHub when needed.
-4. The database is validated and cached locally.
-5. The local database hash is compared with a trusted SHA-256 hash stored in NinjaOne.
-6. Currently present Mouse, Keyboard, and HIDClass devices are collected.
-7. USB and supported Bluetooth identifiers are converted into normalized VID/PID values.
-8. Duplicate interfaces representing the same device model are consolidated.
-9. Devices are matched against `device-database.csv`.
-10. The current inventory is compared with the accepted NinjaOne baseline.
-11. Status, inventory, baseline, and comparison details are written to NinjaOne custom fields.
-
-Routine runs normally use the trusted local database and do not contact GitHub.
-
-## Device classifications
-
-The database supports the following classifications:
-
-| Classification | Meaning |
-|---|---|
-| `Approved` | The device model is approved across all monitored computers. |
-| `Known` | The model has been identified, but it is not globally approved. |
-| `Prohibited` | The model is explicitly forbidden, such as a known mouse jiggler. |
-| `Ignored` | The model is intentionally excluded from baseline comparisons. |
-| `Unknown` | Assigned by the script when a valid device model cannot be resolved from the database. |
-
-`Unknown` normally does not need to be entered into the CSV. It is assigned dynamically when no matching model is found.
+- Validate the 60-minute Alert Evaluator startup grace period during a future comparable reboot and patch cycle
+- Develop reliable stale Bluetooth-pair detection
+- Document when technicians should approve an endpoint baseline versus approve a VID/PID model globally
+- Design missing expected keyboard/mouse reporting without alerting on every ordinary device change
+- Continue production-driven filtering and reporting refinements
 
 ## Repository contents
 
 ```text
 DeviceDetective
 ├── DeviceDetective.ps1
+├── DeviceDetective_AlertEvaluator.ps1
 ├── device-database.csv
 └── README.md
-````
+```
 
 ### `DeviceDetective.ps1`
 
-The PowerShell script deployed and executed through NinjaOne.
+The main inventory, classification, database, baseline, and NinjaOne custom-field script.
+
+### `DeviceDetective_AlertEvaluator.ps1`
+
+The helper used by the NinjaOne Script Result condition. It reads Device Detective fields and emits one concise result for alert evaluation. It does not enumerate devices, modify baselines, contact Zendesk directly, or change Device Detective custom fields.
 
 ### `device-database.csv`
 
-The central VID/PID friendly-name and classification database.
+A repository copy of the VID/PID database. Production endpoints obtain their configured database URL from the NinjaOne `githubUrl` script variable.
 
 ## Requirements
 
-* Windows endpoint
-* Windows PowerShell 5.1 or later
-* NinjaOne agent
-* NinjaOne custom fields configured as documented below
-* Internet access to `raw.githubusercontent.com` when a database download is required
-* Script execution as `SYSTEM`
+- Windows endpoint
+- Windows PowerShell 5.1 or later
+- NinjaOne agent
+- Script execution as `SYSTEM`
+- Required NinjaOne custom fields and exact drop-down values
+- Read/write custom-field permission for the main script
+- Read permission for the Alert Evaluator
+- Internet access to the configured HTTPS raw database URL when a download is required
+- A NinjaOne Script Result condition for alert evaluation
+- NinjaOne's native Zendesk action when ticket creation is required
 
 ## NinjaOne script variable
 
-Create the following NinjaOne script variable:
+Configure this script variable for `DeviceDetective.ps1`:
 
-| Setting         | Value        |
-| --------------- | ------------ |
-| Display name    | `GitHub URL` |
-| Calculated name | `githubUrl`  |
-| Type            | String/Text  |
-| Required        | Yes          |
+| Setting | Value |
+|---|---|
+| Display name | `GitHub URL` |
+| Calculated name | `githubUrl` |
+| Type | String/Text |
+| Required | Yes |
 
-Example value:
+Current database URL format:
 
 ```text
 https://raw.githubusercontent.com/Occulta-Impetum/DeviceDetective-Database/refs/heads/main/device-database.csv
 ```
 
-The script reads this value through:
+The script reads the value from:
 
 ```powershell
 $env:githubUrl
 ```
 
-The GitHub URL is intentionally not hardcoded into the script.
+The URL is intentionally not hardcoded into the script.
 
 ## NinjaOne custom fields
 
-Create the following device custom fields:
+Create these device custom fields:
 
-| Display name                     | Field name                      | Type       |
-| -------------------------------- | ------------------------------- | ---------- |
-| Device Detective Action          | `deviceDetectiveAction`         | Drop-down  |
-| Device Detective Baseline        | `deviceDetectiveBaseline`       | Multi-line |
+| Display name | Field name | Type |
+|---|---|---|
+| Device Detective Status | `deviceDetectiveStatus` | Drop-down |
+| Device Detective Action | `deviceDetectiveAction` | Drop-down |
+| Device Detective Last Run | `deviceDetectiveLastRun` | Date/Time |
+| Device Detective Alert Devices | `deviceDetectiveAlertDevices` | Multi-line |
 | Device Detective Current Devices | `deviceDetectiveCurrentDevices` | Multi-line |
-| Device Detective Database Hash   | `deviceDetectiveDatabaseHash`   | Text       |
-| Device Detective Details         | `deviceDetectiveDetails`        | Multi-line |
-| Device Detective Last Run        | `deviceDetectiveLastRun`        | Date/Time  |
-| Device Detective Status          | `deviceDetectiveStatus`         | Drop-down  |
+| Device Detective Details | `deviceDetectiveDetails` | Multi-line |
+| Device Detective Baseline | `deviceDetectiveBaseline` | Multi-line |
+| Device Detective Database Hash | `deviceDetectiveDatabaseHash` | Text |
 
-Scripts must have permission to read and write these fields.
-Technicians should be allowed to read and write to Device Detective Action and only read the rest of the fields.
-
-### Action values
-
-Configure `deviceDetectiveAction` with these exact values:
-
-```text
-None
-Approve Current Baseline
-Refresh Database
-Reset Local Data
-```
+Technicians should be able to read every field, write Device Detective Action, and edit a baseline only through the documented workflow. Scripts require the permissions appropriate to their reads and writes.
 
 ### Status values
 
@@ -160,63 +121,174 @@ Prohibited Device
 Error
 ```
 
+- `Normal`: The current inventory matches the accepted state, or only safe changes were accepted automatically.
+- `Review Required`: A new Known or Unknown model or another unsafe classification change needs technician review.
+- `Prohibited Device`: A currently detected model is classified as Prohibited.
+- `Error`: The main script could not safely complete inventory or state processing.
+
+### Action values
+
+Configure `deviceDetectiveAction` with these exact values:
+
+```text
+None
+Approve Current Baseline
+Refresh Database
+Reset Local Data
+```
+
+- `None`: Perform the normal scheduled workflow.
+- `Approve Current Baseline`: Accept the current endpoint inventory as its baseline.
+- `Refresh Database`: Download, validate, and use the current central database.
+- `Reset Local Data`: Remove local Device Detective data, clear relevant fields, and rebuild from a fresh database during the same run.
+
 Drop-down values must match exactly, including capitalization and spacing.
 
-## Action behavior
+## Important approval behavior
 
-### `None`
+Endpoint baseline approval and global database approval are different:
 
-Runs normal inventory, classification, and baseline evaluation.
+- Endpoint baseline approval accepts a model only for the selected computer.
+- Changing a model to Approved in the central database applies globally to every endpoint reporting that VID/PID.
+- A Known model may be accepted into an endpoint baseline without becoming globally Approved.
+- A Prohibited model cannot be accepted through `Approve Current Baseline`.
+- An intentionally empty inventory can be manually accepted for a legitimate headless computer.
 
-### `Approve Current Baseline`
+### Open implementation discrepancy
 
-Accepts the current device inventory as the baseline for that computer.
+The current `DeviceDetective.ps1` blocks baseline approval when a Prohibited device is present, but it does **not** currently block an Unknown device from being accepted. The published technician documentation states that Unknown and Prohibited devices cannot be approved into the current baseline.
 
-This does not approve a device model globally. A device may remain classified as `Known` while being accepted as part of one computer's baseline.
+Until the script is aligned with that documented rule, technicians must not use `Approve Current Baseline` while an Unknown device is present. This is an open code/documentation issue.
 
-Manual approval is rejected when a `Prohibited` device is present.
+## Main-script workflow
 
-### `Refresh Database`
+`DeviceDetective.ps1` performs this general workflow:
 
-Downloads and validates the current GitHub database immediately, updates the local cache, and stores the new trusted hash in NinjaOne.
+1. Creates `C:\ProgramData\SysAdminBot\DeviceDetective` if needed.
+2. Reads the requested NinjaOne action.
+3. Validates the trusted local database and its stored SHA-256 hash.
+4. Downloads and validates a replacement database when required.
+5. Reads the accepted endpoint baseline.
+6. Enumerates present Mouse, Keyboard, and HIDClass devices.
+7. Retries a zero-device result as many as three times, with 10-second delays.
+8. Normalizes supported USB and Bluetooth identifiers.
+9. Consolidates interfaces representing the same VID/PID model.
+10. Applies internal, generic, Surface, converted-device, and VHF filtering rules.
+11. Resolves devices against the local database.
+12. Optionally refreshes an old database when missing or Known/Unknown valid VID/PID models are present.
+13. Compares the current device records with the accepted baseline.
+14. Determines safe and unsafe changes.
+15. Writes inventory, alert devices, status, details, last-run time, hash, and any baseline update to NinjaOne.
 
-The action is reset to `None` after processing.
+Routine runs normally use the trusted local database and do not contact GitHub.
 
-### `Reset Local Data`
+## Device classifications
 
-Removes locally cached Device Detective data and clears the related baseline, current-device, and database-hash fields.
+| Classification | Meaning |
+|---|---|
+| `Approved` | The VID/PID model is approved globally. |
+| `Known` | The model is identified but not globally approved. |
+| `Unknown` | The script could not resolve the current model to an applicable classified database record. |
+| `Prohibited` | The model is forbidden, including known mouse jigglers. |
+| `Ignored` | The record or interface is intentionally excluded from actionable monitoring. |
 
-The endpoint then behaves like a new deployment and downloads a fresh database.
+The CSV accepts `Approved`, `Known`, `Prohibited`, and `Ignored`. `Unknown` is normally assigned dynamically and does not need to be entered in the database.
 
 ## Baseline behavior
 
-### No existing baseline
+Baselines represent device models rather than unique physical units.
 
-When every current device is classified as `Approved` or `Ignored`, the script creates the initial baseline automatically.
+### No baseline
 
-When a `Known`, `Unknown`, or `Prohibited` device is present, the baseline is not created automatically.
+- Approved/Ignored-only inventories can create an initial baseline automatically.
+- A Known, Unknown, or Prohibited inventory is not automatically baselined.
+- A zero-device result does not create a baseline automatically.
+- IT can explicitly approve an empty baseline for a legitimate headless endpoint.
 
-### Existing baseline matches
+### Matching baseline
 
-The status remains `Normal`, and the baseline is not rewritten.
+- Matching identities and classifications return Normal unless a current Prohibited model is present.
+- A previously accepted Known or Unknown model can remain Normal while it continues to match the endpoint baseline.
+- VendorName and ProductName are descriptive metadata rather than identity.
+- Metadata-only corrections are synchronized into the baseline without creating Review Required.
 
-A `Known` or `Unknown` model that was manually accepted may remain visible in the details field even though the computer is currently normal.
+### Safe changes
 
-### Changed inventory containing only approved devices
+The following changes can update an existing baseline automatically:
 
-The script automatically accepts the new device state and updates the baseline.
+- A newly added Approved model
+- A classification change to Approved
+- A still-present model changing to Ignored
+- Descriptive metadata corrections
 
-### Changed inventory containing a known or unknown device
+An unchanged accepted Known or Unknown model does not block an unrelated safe change elsewhere on the endpoint.
 
-The existing baseline is retained, and the status becomes `Review Required`.
+### Reviewable changes
 
-### Prohibited device detected
+The following remain reviewable:
 
-The existing baseline is retained, and the status becomes `Prohibited Device`.
+- A newly added Known model
+- A newly added Unknown model
+- A newly detected Prohibited model
+- A classification change to Known, Unknown, or Prohibited
+
+Removal of an Approved device is **not currently an alert condition**. The accepted baseline is retained, but the current implementation does not contain the expectation framework needed to decide whether a missing approved device should create a ticket.
+
+## Zero-device startup safeguard
+
+A successful Plug and Play query can temporarily return zero monitored models while Windows is still initializing after boot or wake.
+
+The script therefore:
+
+1. Makes as many as three enumeration attempts.
+2. Waits 10 seconds between zero-result attempts.
+3. Continues normally if devices appear.
+4. Treats persistent zero results as inconclusive when a non-empty accepted baseline exists.
+5. Exits successfully without overwriting Status, Current Devices, Alert Devices, Details, Last Run, or Baseline.
+
+This preserves the last authoritative state and prevents a transient empty snapshot from resetting or creating an alert. Explicit empty-baseline approval for a legitimate headless computer remains supported.
+
+## Alert Devices field
+
+`deviceDetectiveCurrentDevices` contains the complete monitored inventory from the latest authoritative run.
+
+`deviceDetectiveAlertDevices` contains only the current models responsible for Review Required or Prohibited Device. Normal and Error runs clear Alert Devices so stale device data is not reused.
+
+The Alert Evaluator uses Alert Devices rather than parsing the human-readable Details field.
+
+## Alert Evaluator behavior
+
+The Alert Evaluator emits exactly one result line:
+
+- Normal: `DEVICE_DETECTIVE_NORMAL`
+- Any non-Normal production state: a line beginning with `DEVICE_DETECTIVE_ALERT`
+
+For alert states, the result includes:
+
+- Device Detective status
+- Most recent locally available active user
+- Alert Devices summary
+- Concise Details only when Device Detective status is Error
+
+The evaluator exits successfully for controlled Device Detective alert states so they are not treated as script-execution failures.
+
+### Post-reboot field safeguard
+
+NinjaOne can run the evaluator before custom-field metadata is available after a reboot. The evaluator therefore:
+
+1. Tries the Status field as many as three times.
+2. Waits 10 seconds between attempts.
+3. Caches every successful complete evaluation in:
+   `C:\ProgramData\SysAdminBot\DeviceDetective\AlertEvaluator.last-result.txt`
+4. Reuses the cached result when field access still fails during the first 60 minutes after Windows startup.
+5. Temporarily emits Normal during that grace period on a new endpoint with no cache.
+6. Emits Helper Script Error when persistent field access failure occurs outside the grace period.
+
+The 60-minute value was selected after `LBT600` remained unable to resolve the field beyond the earlier 15-minute window during a reboot and patch cycle. It remains under production observation.
 
 ## Device database format
 
-The CSV uses the following columns:
+The CSV columns are:
 
 ```csv
 VendorID,ProductID,VendorName,ProductName,Classification,Notes
@@ -230,19 +302,19 @@ Example:
 1532,0504,"Razer USA, Ltd","Kraken 7.1 Chroma",Known,""
 ```
 
-### Formatting rules
+Formatting rules:
 
-* `VendorID` should be four hexadecimal characters.
-* `ProductID` should be four hexadecimal characters for product records.
-* IDs should be stored as text so leading zeroes are preserved.
-* Use uppercase hexadecimal values for consistency.
-* Do not include `VID_` or `PID_` prefixes.
-* Use only the documented classification values.
-* Vendor-only reference rows may have a blank ProductID and classification.
-* Save the file as UTF-8 CSV.
-* Disable automatic numeric and scientific-notation conversion when editing in Excel.
+- VendorID should be four hexadecimal characters for valid VID records.
+- ProductID should be four hexadecimal characters for product records.
+- Store IDs as text so leading zeroes remain intact.
+- Use uppercase hexadecimal values for consistency.
+- Do not include `VID_` or `PID_` prefixes.
+- Use only the classifications accepted by the CSV validator.
+- Vendor-only reference rows may have a blank ProductID and classification.
+- Save as UTF-8 CSV.
+- Prevent spreadsheet software from converting IDs to numbers or scientific notation.
 
-## Database caching and validation
+## Database caching and refresh
 
 The local working directory is:
 
@@ -250,114 +322,117 @@ The local working directory is:
 C:\ProgramData\SysAdminBot\DeviceDetective
 ```
 
-The path is created using:
-
-```powershell
-Join-Path $env:ProgramData "SysAdminBot\DeviceDetective"
-```
-
-Typical local files include:
+Typical files include:
 
 ```text
 device-database.csv
 DeviceDetective.log
+AlertEvaluator.last-result.txt
 ```
 
-The script:
+The main script:
 
-* Downloads to a temporary file
-* Validates required CSV columns
-* Validates classification values
-* Confirms valid VID/PID product records exist
-* Calculates a SHA-256 hash
-* Replaces the local cache only after validation succeeds
-* Stores the trusted hash in NinjaOne
-* Detects changes made directly to the local CSV
-* Restores the official GitHub version after a hash mismatch
-
-If GitHub is unavailable and a trusted local copy exists, the script continues using the local database.
-
-## Database refresh behavior
-
-Device Detective avoids downloading the database during every scheduled run.
+- Downloads to a temporary file
+- Validates required columns
+- Validates classification values
+- Confirms at least one valid VID/PID product record
+- Calculates SHA-256
+- Replaces the local database only after validation succeeds
+- Stores the trusted hash in NinjaOne
+- Detects local modification or corruption
+- Replaces an untrusted local copy with the configured central copy
 
 GitHub is contacted when:
 
-* No local database exists
-* The trusted NinjaOne hash is empty
-* The local database fails validation
-* The local hash does not match the trusted hash
-* `Refresh Database` is selected
-* A valid missing VID/PID is detected and the configured minimum refresh age has passed
+- No local database exists
+- The trusted NinjaOne hash is blank
+- Local validation fails
+- The local hash differs from the trusted hash
+- Refresh Database is requested
+- A valid missing, Known, or Unknown VID/PID model is present and the cache is at least 24 hours old
 
-Unexpected or generic Bluetooth identifiers do not force a database refresh.
+After an automatic refresh, current devices are resolved again before status and baseline decisions. Failure of the age-gated automatic review-candidate refresh logs a warning and continues with the trusted local results. A required initial, forced, invalid-cache, or tamper-recovery download failure puts the main script into Error.
 
-## Bluetooth handling
+## Bluetooth and interface handling
 
-Device Detective supports several Bluetooth HID identifier formats and attempts to extract a usable four-character VID and PID.
+Device Detective supports standard USB, Bluetooth, and Bluetooth LE identifier forms where Windows exposes usable VID/PID data.
 
-Interfaces that normalize to the same VID/PID are consolidated into one device model.
+It can enrich supported Bluetooth records with:
 
-Generic Bluetooth HID or BLE GATT child interfaces that do not expose a reliable model identifier may be excluded when they only duplicate an already detected physical device.
+- Friendly name
+- Bluetooth address
+- Paired state
+- Current connection state
+- Last validated wake/connect timestamp
 
-## NinjaOne field notes
+Bluetooth connection state is informational only. A legitimate sleeping battery-powered peripheral can appear disconnected, and Windows may continue exposing an obsolete paired HID device as present. Stale-pair removal is therefore not enabled.
 
-NinjaOne Multi-line custom fields may be returned to PowerShell as a `System.Object[]` containing one element per line.
+Additional filtering includes:
 
-The script rejoins those lines into a single string before parsing baseline JSON.
+- Generic Bluetooth HID/BLE children without usable model identity
+- Duplicate USB/Bluetooth interfaces for the same model
+- Microsoft Surface internal touch, pen, button, keyboard, virtual HID, and related interfaces, only on identified Surface hardware
+- Nonstandard `CONVERTEDDEVICE` records without valid VID/PID
+- A `HID_DEVICE_SYSTEM_VHF` child only when parent tracing proves it belongs to an independently represented physical VID/PID model
 
-Multi-line fields have a 10,000-character platform limit. Device Detective uses a lower internal limit to provide additional safety.
+Unexplained VHF devices remain visible for review.
 
-## Suggested deployment process
+## NinjaOne and Zendesk alert lifecycle
 
-1. Create the required NinjaOne custom fields.
-2. Configure the drop-down values exactly as documented.
-3. Add the GitHub URL script variable.
-4. Upload the tested PowerShell script to NinjaOne.
-5. Run the automation as `SYSTEM`.
-6. Test on an IT-owned computer.
-7. Review the current-device and details fields.
-8. Test database refresh and tamper protection.
-9. Test approved, known, unknown, and prohibited devices.
-10. Pilot on a small NinjaOne policy group.
-11. Configure NinjaOne alert conditions only after the inventory results are reliable.
-12. Deploy gradually to production endpoints.
+Production uses a NinjaOne Script Result condition based on the Alert Evaluator:
 
-A 15-minute schedule is currently planned, but the final schedule should be confirmed before production deployment.
+- Normal emits only `DEVICE_DETECTIVE_NORMAL`.
+- Non-Normal states emit `DEVICE_DETECTIVE_ALERT`.
+- NinjaOne's native Create Zendesk Ticket action creates the ticket.
+- Repeated evaluation during the same active condition does not create duplicate tickets.
+- Condition reset is appended to the original ticket and does not automatically close it.
+- Ticket templates use the `ninjaone_alert` tag.
+- Zendesk requester-notification triggers exclude `ninjaone_alert` tickets.
+- Ticket-template retrigger behavior has been adjusted so renewed conditions remain actionable instead of being lost in an earlier Open or Solved ticket.
+
+Zendesk credentials and ticket API logic do not belong in either PowerShell script.
+
+## Deployment and validation
+
+1. Create the required custom fields and exact drop-down values.
+2. Grant the required script permissions.
+3. Configure the `githubUrl` variable for the main script.
+4. Add `DeviceDetective.ps1` to NinjaOne and run it as SYSTEM.
+5. Add `DeviceDetective_AlertEvaluator.ps1` to the Script Result condition.
+6. Validate Normal, Review Required, Prohibited Device, and Error behavior.
+7. Confirm Current Devices and Alert Devices contain the intended records.
+8. Test database refresh, validation, and tamper recovery.
+9. Confirm `AlertEvaluator.last-result.txt` is created and updated.
+10. Validate Zendesk creation, duplicate suppression, reset, and retrigger behavior.
+11. Deploy through the Windows Workstation Policy.
+12. Run Device Detective hourly, 24 hours a day.
+13. Continue observing reboot and patch cycles for the 60-minute safeguard.
 
 ## Security considerations
 
-* Do not store credentials, API tokens, endpoint inventories, usernames, or confidential information in the public repository.
-* The public database should contain only hardware identifiers, friendly names, classifications, and non-sensitive notes.
-* Keep Zendesk or other service credentials out of the PowerShell script.
-* NinjaOne should handle alerting and ticket integration separately.
-* Device Detective classifies device models, not individual physical units.
-* Approval is based on VID/PID and therefore applies to every unit reporting the same model identifiers.
-* This tool assists with monitoring and review but should not be treated as a complete device-control or data-loss-prevention system.
+- Do not store credentials, tokens, endpoint inventories, usernames, or confidential data in the public repository.
+- Limit the public database to hardware identifiers, friendly names, classifications, and non-sensitive notes.
+- Keep Zendesk credentials and direct ticketing logic out of the scripts.
+- Treat VID/PID approval as model-wide rather than unit-specific.
+- Device Detective supports monitoring and technician review; it is not a complete device-control or data-loss-prevention system.
 
-## Known limitations
+## Known limitations and open work
 
-* Some hardware does not expose a reliable VID/PID.
-* Composite devices may expose multiple Windows interfaces.
-* Bluetooth device reporting varies by hardware and Windows driver.
-* A VID/PID normally identifies a model rather than a unique physical unit.
-* Current monitoring includes Mouse, Keyboard, and HIDClass devices, so some headsets and other HID-capable hardware may also appear.
-* Removal of approved devices currently may be accepted automatically when the remaining inventory is otherwise approved.
-* Specialized reporting for computers missing expected keyboards or mice has not yet been implemented.
-* NinjaOne alerts and Zendesk ticket workflows are not yet included in the current development build.
-
-## Planned improvements
-
-* NinjaOne alert-state configuration
-* Zendesk ticket creation and clearing
-* Missing keyboard and mouse reporting
-* Additional device-category filtering
-* Broader Bluetooth testing
-* Pilot and production deployment documentation
-* Changelog and release versioning
-* Additional reporting and audit history
+- Some hardware does not expose reliable VID/PID.
+- Composite hardware may expose multiple Windows interfaces.
+- Bluetooth reporting varies by hardware and driver.
+- VID/PID normally identifies a model, not an individual physical unit.
+- HID-class monitoring can include headsets and other HID-capable hardware.
+- Windows may expose stale paired Bluetooth devices as present.
+- Instantaneous Bluetooth connection state cannot safely distinguish obsolete pairings from sleeping devices.
+- Unexplained VHF records remain visible unless parent tracing proves duplication.
+- NinjaOne collapses Alert Evaluator line breaks before passing output to Zendesk.
+- Reset entries can be visually confusing even though they append correctly.
+- Missing expected keyboard/mouse reporting requires a separate expectation model and is not implemented.
+- Unknown-device baseline approval is not yet blocked in code despite the documented technician rule.
+- The 60-minute post-reboot field safeguard remains under observation.
+- Release versioning and a formal changelog have not yet been added.
 
 ## License
 
 No license has currently been assigned to this project.
-
