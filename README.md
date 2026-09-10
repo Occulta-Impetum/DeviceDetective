@@ -151,14 +151,10 @@ Endpoint baseline approval and global database approval are different:
 - Endpoint baseline approval accepts a model only for the selected computer.
 - Changing a model to Approved in the central database applies globally to every endpoint reporting that VID/PID.
 - A Known model may be accepted into an endpoint baseline without becoming globally Approved.
-- A Prohibited model cannot be accepted through `Approve Current Baseline`.
+- An Unknown model cannot be accepted through `Approve Current Baseline`; it must first be identified and classified in the central database.
+- A Prohibited model cannot be accepted through `Approve Current Baseline` and must be removed.
+- If Unknown and Prohibited models are both present, Prohibited Device remains the higher-priority status.
 - An intentionally empty inventory can be manually accepted for a legitimate headless computer.
-
-### Open implementation discrepancy
-
-The current `DeviceDetective.ps1` blocks baseline approval when a Prohibited device is present, but it does **not** currently block an Unknown device from being accepted. The published technician documentation states that Unknown and Prohibited devices cannot be approved into the current baseline.
-
-Until the script is aligned with that documented rule, technicians must not use `Approve Current Baseline` while an Unknown device is present. This is an open code/documentation issue.
 
 ## Main-script workflow
 
@@ -272,19 +268,20 @@ For alert states, the result includes:
 
 The evaluator exits successfully for controlled Device Detective alert states so they are not treated as script-execution failures.
 
-### Post-reboot field safeguard
+### Temporary custom-field availability safeguard
 
-NinjaOne can run the evaluator before custom-field metadata is available after a reboot. The evaluator therefore:
+NinjaOne can temporarily make custom-field metadata unavailable after a reboot or while agent, policy, and update components are initializing. The evaluator therefore:
 
 1. Tries the Status field as many as three times.
 2. Waits 10 seconds between attempts.
 3. Caches every successful complete evaluation in:
    `C:\ProgramData\SysAdminBot\DeviceDetective\AlertEvaluator.last-result.txt`
-4. Reuses the cached result when field access still fails during the first 60 minutes after Windows startup.
-5. Temporarily emits Normal during that grace period on a new endpoint with no cache.
-6. Emits Helper Script Error when persistent field access failure occurs outside the grace period.
+4. Reuses the cached result when it is no more than 120 minutes old, regardless of system uptime.
+5. Emits `DEVICE_DETECTIVE_NORMAL` when the cache is missing or stale because an unreadable field is not evidence of a Device Detective alert.
+6. Retains the 60-minute startup grace period as an explicit initialization safeguard.
+7. Reserves Helper Script Error output for unexpected evaluator failures outside the targeted status-field access condition.
 
-The 60-minute value was selected after `LBT600` remained unable to resolve the field beyond the earlier 15-minute window during a reboot and patch cycle. It remains under production observation.
+The cache timestamp represents the last successful Alert Evaluator field read, not the last hourly Device Detective inventory run. The cache-age behavior is deployed and normal alert triggering has been verified; observation during a naturally occurring NinjaOne update or patch window remains pending.
 
 ## Device database format
 
@@ -429,8 +426,7 @@ Zendesk credentials and ticket API logic do not belong in either PowerShell scri
 - NinjaOne collapses Alert Evaluator line breaks before passing output to Zendesk.
 - Reset entries can be visually confusing even though they append correctly.
 - Missing expected keyboard/mouse reporting requires a separate expectation model and is not implemented.
-- Unknown-device baseline approval is not yet blocked in code despite the documented technician rule.
-- The 60-minute post-reboot field safeguard remains under observation.
+- The 120-minute evaluator cache-age fallback remains under observation during a future NinjaOne update or patch window.
 - Release versioning and a formal changelog have not yet been added.
 
 ## License
