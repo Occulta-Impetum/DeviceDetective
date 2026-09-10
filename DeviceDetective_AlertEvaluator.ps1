@@ -55,14 +55,16 @@ $MaximumOutputLength        = 6000
 $MaximumDeviceSectionLength = 4000
 $MaximumDetailsLength       = 1000
 
-# NinjaOne custom fields can be temporarily unavailable while the agent and
-# policy metadata initialize after a reboot. Retry status reads before falling
-# back to the last authoritative evaluator result during a bounded grace period.
-$StatusReadMaximumAttempts    = 3
-$StatusReadRetryDelaySeconds  = 10
-$StartupGracePeriodMinutes    = 60
-$RootPath                     = Join-Path $env:ProgramData "SysAdminBot\DeviceDetective"
-$EvaluatorCachePath           = Join-Path $RootPath "AlertEvaluator.last-result.txt"
+# NinjaOne custom fields can be temporarily unavailable while the agent,
+# policy metadata, or update components initialize. Retry status reads before
+# falling back to a recent authoritative evaluator result. Never create a
+# Device Detective alert solely because NinjaOne made the field unavailable.
+$StatusReadMaximumAttempts       = 3
+$StatusReadRetryDelaySeconds     = 10
+$StartupGracePeriodMinutes       = 60
+$EvaluatorCacheMaximumAgeMinutes = 120
+$RootPath                        = Join-Path $env:ProgramData "SysAdminBot\DeviceDetective"
+$EvaluatorCachePath              = Join-Path $RootPath "AlertEvaluator.last-result.txt"
 
 # ---------------------------------------------------------------------------
 # Functions
@@ -219,6 +221,23 @@ function Get-CachedEvaluationResult {
     }
     catch {
         return ""
+    }
+}
+
+function Get-CachedEvaluationResultAgeMinutes {
+    [CmdletBinding()]
+    param()
+
+    try {
+        if (-not (Test-Path -LiteralPath $EvaluatorCachePath -PathType Leaf)) {
+            return $null
+        }
+
+        $CacheFile = Get-Item -LiteralPath $EvaluatorCachePath -ErrorAction Stop
+        return ((Get-Date).ToUniversalTime() - $CacheFile.LastWriteTimeUtc).TotalMinutes
+    }
+    catch {
+        return $null
     }
 }
 
@@ -479,32 +498,41 @@ try {
     }
     catch {
         $MinutesSinceStartup = Get-MinutesSinceStartup
+        $CachedResultAgeMinutes = Get-CachedEvaluationResultAgeMinutes
+        $CachedResult = ConvertTo-CleanSingleLine `
+            -Value (Get-CachedEvaluationResult) `
+            -Fallback ""
 
-        if (
-            $null -ne $MinutesSinceStartup -and
-            $MinutesSinceStartup -le $StartupGracePeriodMinutes
-        ) {
-            $CachedResult = ConvertTo-CleanSingleLine `
-                -Value (Get-CachedEvaluationResult) `
-                -Fallback ""
+        $CacheIsRecent = (
+            $null -ne $CachedResultAgeMinutes -and
+            $CachedResultAgeMinutes -ge 0 -and
+            $CachedResultAgeMinutes -le $EvaluatorCacheMaximumAgeMinutes -and
+            -not [string]::IsNullOrWhiteSpace($CachedResult)
+        )
 
-            if (-not [string]::IsNullOrWhiteSpace($CachedResult)) {
-                Write-EvaluationResult -Value $CachedResult
-            }
-            else {
-                # A newly enrolled endpoint may not have an authoritative cache
-                # yet. Defer alerting during the startup grace period rather than
-                # create a false Helper Script Error ticket.
-                Write-EvaluationResult -Value "DEVICE_DETECTIVE_NORMAL"
-            }
-
+        if ($CacheIsRecent) {
+            # Preserve the last result when the evaluator accessed the field
+            # successfully within the bounded cache window.
+            Write-EvaluationResult -Value $CachedResult
             exit 0
         }
 
-        $ErrorText = ConvertTo-CleanSingleLine -Value $_.Exception.Message -Fallback "Unable to read Device Detective status."
-        $ErrorText = Limit-Text -Value $ErrorText -MaximumLength 800
+        $IsWithinStartupGracePeriod = (
+            $null -ne $MinutesSinceStartup -and
+            $MinutesSinceStartup -le $StartupGracePeriodMinutes
+        )
 
-        Write-EvaluationResult -Value "DEVICE_DETECTIVE_ALERT | Status: Helper Script Error | Details: $ErrorText"
+        if ($IsWithinStartupGracePeriod) {
+            # A newly started or enrolled endpoint may not have a recent
+            # authoritative cache yet. Defer alerting while NinjaOne initializes.
+            Write-EvaluationResult -Value "DEVICE_DETECTIVE_NORMAL"
+            exit 0
+        }
+
+        # NinjaOne can temporarily hide custom-field metadata during agent,
+        # policy, or patch activity even when Windows has not recently booted.
+        # An unreadable field is not evidence of a Device Detective problem.
+        Write-EvaluationResult -Value "DEVICE_DETECTIVE_NORMAL"
         exit 0
     }
 
