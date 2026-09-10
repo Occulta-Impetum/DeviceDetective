@@ -18,7 +18,7 @@
       - Creates and maintains an accepted device baseline
       - Automatically accepts states containing only Approved or Ignored models
       - Supports manual baseline approval through a NinjaOne action field
-      - Rejects manual baseline approval when a Prohibited model is present
+      - Rejects manual baseline approval when an Unknown or Prohibited model is present
       - Reports added, removed, and reclassified models in the details field
 
 .NINJAONE SCRIPT VARIABLE
@@ -1799,6 +1799,11 @@ try {
         if ($ProhibitedCount -gt 0) {
             $Status = "Prohibited Device"
             $BaselineActionSummary = "Manual baseline approval was rejected because the current state contains a prohibited device."
+            Write-DeviceDetectiveLog -Level "WARNING" -Message $BaselineActionSummary
+        }
+        elseif ($UnknownCount -gt 0) {
+            $Status = "Review Required"
+            $BaselineActionSummary = "Manual baseline approval was rejected because the current state contains an unknown device. Identify and classify the device in the central database before approving the endpoint baseline."
             Write-DeviceDetectiveLog -Level "WARNING" -Message $BaselineActionSummary
         }
         elseif ($NoCurrentDevices) {
